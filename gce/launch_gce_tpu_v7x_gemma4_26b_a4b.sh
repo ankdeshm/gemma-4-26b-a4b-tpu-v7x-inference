@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Turnkey GCE TPU v7x (tpu7x-standard-4t) Serving & Benchmark Recipe
+# Optional Single-Host (1 host = 4 chips) GCE TPU v7x (tpu7x-standard-4t) Helper
 # Model: google/gemma-4-26B-A4B-it (Pure BF16 & FP8-Dynamic)
-# Supports 1 host (4 chips), 2 hosts (8 chips), or 4 hosts (16 chips) + c2-standard-16 Client VM.
+# NOTE: For DWS Calendar Mode reservations and Multi-Host (2-host / 8-chip or 4-host / 16-chip)
+# deployments, use the tested GKE workflow in INFRA_SETUP.md and k8s/provision_gke_dws_calendar.sh.
 set -euo pipefail
 
 GCS_BUCKET="${GCS_BUCKET:?Set GCS_BUCKET=<YOUR_GCS_BUCKET>}"

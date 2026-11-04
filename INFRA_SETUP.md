@@ -1,66 +1,56 @@
-# End-to-End GCP Infrastructure & DWS Calendar Reservation Setup Guide for Ironwood TPU (`v7x`)
+# End-to-End GKE Infrastructure & DWS Calendar Reservation Setup Guide for Ironwood TPU (`v7x`)
 
-This guide walks first-time Google Cloud users through setting up the complete cloud infrastructure required to deploy and benchmark **`google/gemma-4-26B-A4B-it`** (both **Pure BF16** and **FP8-Dynamic**) on **Ironwood TPU (`tpu7x-standard-4t`)** using a **Dynamic Workload Scheduler (DWS) Calendar Mode reservation**.
+This guide walks first-time Google Cloud users through setting up the production-grade cloud infrastructure required to deploy and benchmark **`google/gemma-4-26B-A4B-it`** (both **Pure `bfloat16`** and **FP8-Dynamic**) on **Ironwood TPU (`tpu7x-standard-4t`)** using a **Dynamic Workload Scheduler (DWS) Calendar Mode reservation**.
+
+All configurations and benchmarks in this repository were validated on **Google Kubernetes Engine (GKE)** with `tpu7x-standard-4t` node pools.
 
 ---
 
-## 1. Architecture Decision: Can You Run TPU `v7x` on GCE / MIG Without GKE?
+## 1. Architecture Decision: Why GKE is Required for Multi-Host & Production Ironwood (`tpu7x`)
 
-**Yes — Google Kubernetes Engine (GKE) is NOT required to serve or benchmark `google/gemma-4-26B-A4B-it` on `1` host (`4` chips), `2` hosts (`8` chips), or `4` hosts (`16` chips).**
+A common question from teams new to Google Cloud TPUs is whether a **DWS Calendar Mode reservation** (`e.g., 4 x tpu7x-standard-4t = 16 chips`) should be consumed via standalone **Compute Engine (GCE) VMs** or **Google Kubernetes Engine (GKE)**.
 
-### Why Standalone GCE VMs (or a GCE MIG) Work for Both Single-Host and Multi-Host LLM Serving
-
-| Hardware Unit | Physical Spec | How `gemma-4-26B-A4B-it` Fits & Scales on GCE |
+| Deployment Scenario | Recommended Platform | Architectural Rationale |
 |---|---|---|
-| **`1 x tpu7x-standard-4t` VM** (Single Host) | `4` Ironwood TPU chips (`2x2x1` intra-host ICI mesh) = **`8` TensorCores** + SparseCores, **`768 GB` HBM3e** (`192 GB`/chip @ `7.4 TB/s`/chip) | The full `google/gemma-4-26B-A4B-it` checkpoint is **`~52 GB` in BF16** (`~28.7 GB` in FP8-Dynamic). A single 4-chip VM holds the entire model (`TP=8, EP` or `TP=2, DP=4, EP`) using `< 7%` of HBM for weights, leaving **`> 700 GB` of HBM3e per host** for long-context (`32k+`) KV cache. |
-| **`2 x tpu7x-standard-4t` VMs** (`8` Chips) | `2` independent 4-chip GCE VMs (`16` TensorCores, `1.54 TB` HBM3e) | Each GCE VM runs its own self-contained OpenAI API server on `:8000`. A lightweight `least_conn` load balancer (`scripts/lb_proxy.py` or NGINX) on the CPU Client VM distributes requests across both hosts with zero cross-host ICI barrier overhead. |
-| **`4 x tpu7x-standard-4t` VMs** (`16` Chips) | `4` independent 4-chip GCE VMs (`32` TensorCores, `3.07 TB` HBM3e) | Linearly scales throughput (`3.28x–6.09x` Goodput scaling) by running `4` independent 4-chip servers behind the Client VM load balancer. |
+| **Single-Host Quick Test (`1 x tpu7x-standard-4t` = `4` Chips / `8` TensorCores)** | **GKE** (Recommended) or **Single GCE VM** | A single `tpu7x-standard-4t` host (`4` physical chips connected via intra-host `2x2x1` ICI, `768 GB` HBM3e) can run as a standalone GCE VM for basic single-node container testing because all 8 TensorCores reside on one motherboard. |
+| **Multi-Host (`2` Hosts = `8` Chips `2x2x2`, or `4` Hosts = `16` Chips `2x2x4`) & Production Serving** | **GKE Standard Cluster** (**Mandatory / Strongly Recommended**) | **Do not use raw GCE VMs for multi-host TPU workloads.** Starting with Ironwood (`tpu7x`), Google Cloud's official AI Hypercomputer stack and TPU recipes are engineered around **GKE** for the reasons below. |
 
-### Comparing the 3 Ways to Consume Your DWS Calendar Reservation
+### Why Raw GCE VMs Are Not Suitable for Multi-Host `tpu7x`
 
-| Provisioning Option | Requires GKE? | Best For | Multi-Host Support |
-|---|---|---|---|
-| **Option A (Recommended): Standalone GCE VMs Bound to DWS Reservation** (`gcloud compute instances create --provisioning-model=RESERVATION_BOUND`) | **No** | Fastest setup for first-time GCP users; direct SSH + Docker control on `1`, `2`, or `4` hosts (`4`, `8`, or `16` chips) | **Yes** — horizontal scale-out via NGINX or `scripts/lb_proxy.py` on the Client VM |
-| **Option B: GCE Managed Instance Group (MIG) + Workload Policy** (`gcloud compute instance-groups managed create`) | **No** | Automated multi-host VM lifecycle on GCE, or co-located `2x2x2` (`8`-chip) / `2x2x4` (`16`-chip) high-throughput ICI slice placement | **Yes** — supports both scale-out load balancing and multi-host ICI (`TPU_MULTIHOST_BACKEND=ray`) |
-| **Option C: GKE Standard Cluster + DWS Reservation Node Pool** (`gcloud container node-pools create --reservation=...`) | **Yes** | Teams standardizing on Kubernetes manifests (`k8s/`), GCSFuse CSI volumes, and K8s Services | **Yes** — via `spec.replicas: 1 / 2 / 4` or multi-host LeaderWorkerSet |
+1. **Legacy Cloud TPU VM API Deprecation & Ironwood Workload Policies**:
+   - Earlier TPU generations used the standalone `gcloud compute tpus tpu-vm` API. On **Ironwood (`tpu7x`)**, multi-host slice placement is governed by regional **Compute Engine Workload Policies (`--type=HIGH_THROUGHPUT --accelerator-topology=2x2x2` or `2x2x4`)** attached to GKE node pools via `--placement-policy` (see [About Ironwood (TPU7x) in GKE](https://cloud.google.com/kubernetes-engine/docs/concepts/tpu-ironwood)).
+2. **Multi-Host Coordination & Slice Discovery (`RayOperator` / KubeRay Webhook / LWS)**:
+   - On raw GCE VMs, hosts have no built-in orchestration to discover peer worker hostnames, assign slice rank IDs, or initialize cross-host optical Inter-Chip Interconnect (ICI) collectives.
+   - On **GKE**, the managed **Ray on GKE add-on (`--addons=RayOperator`)** and its KubeRay TPU webhook (or Kubernetes `LeaderWorkerSet`) automatically inject `TPU_WORKER_ID`, `TPU_WORKER_HOSTNAMES`, `TORCH_TPU_TOPOLOGY`, and `TORCH_TPU_SLICEBUILDER_ADDRESSES` into every Pod across the slice (see [Serve LLMs on multi-host TPUs with Ray and TorchTPU](https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-llm-tpu-ray-torchtpu)).
+3. **Production Load Balancing, Prefix-Aware Routing & Health Recovery**:
+   - GKE provides native Kubernetes `Service` load balancing, **GKE Inference Gateway**, and **Ray Serve LLM** (with prefix-aware KV cache routing, direct token streaming, and atomic slice health checks/auto-repair).
+4. **Native Cloud Storage FUSE CSI Driver (`--addons=GcsFuseCsiDriver`) & NUMA Binding**:
+   - GKE mounts your GCS model bucket directly into Pods via declarative PersistentVolumeClaims (`k8s/*.yaml`) with kernel metadata caching and automatically binds containers to Ironwood's dual-NUMA-node architecture.
 
-```
-                       ┌────────────────────────────────────────────────────┐
-                       │         Regional GCS Bucket (us-central1)          │
-                       │  gs://<YOUR_GCS_BUCKET>/models/gemma-4-26B-A4B-it  │
-                       └─────────┬────────────────────────────────┬─────────┘
-                                 │ gcsfuse                        │ gcsfuse (128MB read-ahead)
-                                 ▼                                ▼
-┌──────────────────────────────────────────┐     ┌───────────────────────────────────────────┐
-│   CPU Client & Benchmark VM (us-central1-c) │     │  DWS Calendar Reserved TPU VMs (1, 2, 4)  │
-│   Machine: c2-standard-16 (250GB SSD)    │     │  Machine: tpu7x-standard-4t (4 chips/VM)  │
-│                                          │     │                                           │
-│  1. Stages HF weights -> GCS bucket      │     │  • tpu-v7x-node-1 (:8000) [4 chips, 768GB]│
-│  2. Runs NGINX / lb_proxy.py (:8080) ────┼────►│  • tpu-v7x-node-2 (:8000) [4 chips, 768GB]│
-│  3. Runs vllm bench serve (--goodput)    │     │  • tpu-v7x-node-3 (:8000) [4 chips, 768GB]│
-│                                          │     │  • tpu-v7x-node-4 (:8000) [4 chips, 768GB]│
-└──────────────────────────────────────────┘     └───────────────────────────────────────────┘
-```
+### Official Google Cloud Documentation References
+- [Request TPUs with future reservation in calendar mode (GKE)](https://cloud.google.com/kubernetes-engine/docs/how-to/tpu-calendar-mode)
+- [About Ironwood (TPU7x) in GKE](https://cloud.google.com/kubernetes-engine/docs/concepts/tpu-ironwood)
+- [Deploy TPU workloads in GKE Standard](https://cloud.google.com/kubernetes-engine/docs/how-to/tpus)
+- [Serve LLMs on multi-host TPUs with Ray and TorchTPU (`Gemma 4 26B-A4B-it`)](https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-llm-tpu-ray-torchtpu)
 
 ---
 
 ## 2. Step 1 — GCP Project Prerequisites, APIs & IAM Permissions
 
-Run the following commands from **Google Cloud Shell** or your local terminal (after running `gcloud auth login`).
+Run the following commands from **Google Cloud Shell** or a workstation with the `gcloud` CLI and `kubectl` installed.
 
 ### 2.1 Set Environment Variables
-
-Edit the variables below to match your GCP project and DWS Calendar reservation name:
 
 ```bash
 export PROJECT_ID="<YOUR_GCP_PROJECT_ID>"
 export REGION="us-central1"
-export ZONE="us-central1-c"                     # Zone where your DWS Calendar reservation is active
-export RESERVATION_NAME="<YOUR_RESERVATION_NAME>" # From: gcloud compute reservations list
+export ZONE="us-central1-c"                        # Zone where your DWS Calendar reservation is approved
+export RESERVATION_NAME="<YOUR_RESERVATION_NAME>"  # From: gcloud compute reservations list
+export CLUSTER_NAME="tpu-v7x-gke-cluster"
 export GCS_BUCKET="${PROJECT_ID}-tpu-v7x-models"
 export VPC_NAME="tpu-v7x-vpc"
 export SUBNET_NAME="tpu-v7x-subnet"
-export SA_NAME="tpu-v7x-bench-sa"
+export SA_NAME="tpu-v7x-gke-sa"
 export SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 gcloud config set project "${PROJECT_ID}"
@@ -72,29 +62,26 @@ gcloud config set compute/zone "${ZONE}"
 
 ```bash
 gcloud services enable \
+  container.googleapis.com \
   compute.googleapis.com \
   tpu.googleapis.com \
   storage.googleapis.com \
   artifactregistry.googleapis.com \
   iam.googleapis.com \
-  iap.googleapis.com \
   logging.googleapis.com \
-  monitoring.googleapis.com \
-  container.googleapis.com
+  monitoring.googleapis.com
 ```
 
-### 2.3 Create the Workload Service Account & Grant IAM Roles
-
-Both the TPU VMs and the CPU Client VM use this Service Account to read/write model checkpoints in GCS and pull container images from Artifact Registry:
+### 2.3 Create the GKE Node Service Account & Grant Required IAM Roles
 
 ```bash
 gcloud iam service-accounts create "${SA_NAME}" \
-  --display-name="TPU v7x Benchmark Service Account"
+  --display-name="GKE Ironwood TPU v7x Service Account"
 
 for ROLE in \
+  roles/container.defaultNodeServiceAccount \
   roles/compute.instanceAdmin.v1 \
-  roles/tpu.admin \
-  roles/storage.admin \
+  roles/storage.objectAdmin \
   roles/artifactregistry.reader \
   roles/logging.logWriter \
   roles/monitoring.metricWriter \
@@ -106,16 +93,14 @@ for ROLE in \
 done
 ```
 
-> **User IAM Note**: Ensure your own user account (`gcloud config get-value account`) has `roles/compute.admin`, `roles/storage.admin`, `roles/iam.serviceAccountUser`, and `roles/iap.tunnelResourceAccessor` in the project.
+> **Required User Roles**: To create the GKE cluster and consume a DWS Calendar reservation, your user account needs `roles/container.admin`, `roles/compute.instanceAdmin.v1` (and `roles/compute.networkAdmin` for VPC creation), `roles/storage.admin`, and `roles/iam.serviceAccountAdmin`.
 
 ---
 
 ## 3. Step 2 — Network Setup (VPC, Subnet, Cloud NAT & Firewall Rules)
 
-For security and maximum throughput, TPU VMs run without public IPv4 addresses (`--no-address`) inside a custom VPC subnet with **Private Google Access** (for full-bandwidth GCS access) and **Cloud NAT** (for outbound Hugging Face and Docker Hub downloads).
-
 ```bash
-# 1. Create custom VPC network
+# 1. Create custom VPC network with jumbo frames (MTU 8896)
 gcloud compute networks create "${VPC_NAME}" \
   --subnet-mode=custom \
   --mtu=8896 \
@@ -128,7 +113,7 @@ gcloud compute networks subnets create "${SUBNET_NAME}" \
   --range="10.128.0.0/20" \
   --enable-private-ip-google-access
 
-# 3. Create Cloud Router & Cloud NAT so internal-only VMs can reach Hugging Face, apt, and Docker Hub
+# 3. Create Cloud Router & Cloud NAT for outbound Hugging Face & container registry pulls
 gcloud compute routers create "${VPC_NAME}-router" \
   --network="${VPC_NAME}" \
   --region="${REGION}"
@@ -139,26 +124,18 @@ gcloud compute routers nats create "${VPC_NAME}-nat" \
   --auto-allocate-nat-external-ips \
   --nat-all-subnet-ip-ranges
 
-# 4. Allow all internal traffic between Client VM and TPU VMs (ports 8000-9200, Ray/ICI, etc.)
+# 4. Allow internal communication across the subnet
 gcloud compute firewall-rules create "${VPC_NAME}-allow-internal" \
   --network="${VPC_NAME}" \
   --allow=tcp:1-65535,udp:1-65535,icmp \
   --source-ranges="10.128.0.0/20"
-
-# 5. Allow SSH via Google Cloud Identity-Aware Proxy (IAP)
-gcloud compute firewall-rules create "${VPC_NAME}-allow-ssh-iap" \
-  --network="${VPC_NAME}" \
-  --allow=tcp:22 \
-  --source-ranges="35.235.240.0/20"
 ```
 
 ---
 
-## 4. Step 3 — Create the Regional GCS Bucket & CPU Client VM
+## 4. Step 3 — Create Regional GCS Bucket & Stage `Gemma-4-26B-A4B-it` Weights
 
 ### 4.1 Create the Regional GCS Bucket (`us-central1`)
-
-> **Important**: Always create the GCS bucket in the **same region (`us-central1`)** as your TPU VMs to avoid cross-region egress latency during model weight loading and XLA compilation cache reads.
 
 ```bash
 gcloud storage buckets create "gs://${GCS_BUCKET}" \
@@ -166,172 +143,79 @@ gcloud storage buckets create "gs://${GCS_BUCKET}" \
   --uniform-bucket-level-access
 ```
 
-### 4.2 Create the CPU Client & Benchmark VM (`c2-standard-16`)
-
-This VM is used to download model weights from Hugging Face to GCS, run the multi-host load balancer (`lb_proxy.py` or NGINX), and execute `vllm bench serve` without stealing CPU cores from the TPU servers:
+### 4.2 Stage Both Pure `bfloat16` and `FP8-Dynamic` Checkpoints to GCS
 
 ```bash
-gcloud compute instances create tpu-bench-client \
-  --zone="${ZONE}" \
-  --machine-type=c2-standard-16 \
-  --network-interface="network=${VPC_NAME},subnetwork=${SUBNET_NAME},nic-type=GVNIC,no-address" \
-  --boot-disk-size=250GB \
-  --boot-disk-type=pd-ssd \
-  --image-family=ubuntu-2404-lts-amd64 \
-  --image-project=ubuntu-os-cloud \
-  --service-account="${SA_EMAIL}" \
-  --scopes=https://www.googleapis.com/auth/cloud-platform
-```
-
-### 4.3 Install Tools & Stage `gemma-4-26B-A4B-it` Checkpoints to GCS
-
-SSH into `tpu-bench-client` using IAP tunnel:
-
-```bash
-gcloud compute ssh tpu-bench-client --zone="${ZONE}" --tunnel-through-iap
-```
-
-Inside `tpu-bench-client`, install `gcsfuse`, Python/`uv`, and NGINX, then stage the model weights to your GCS bucket:
-
-```bash
-# 1. Install system packages & gcsfuse
-sudo apt-get update && sudo apt-get install -y curl git jq nginx fuse3 python3-pip python3-venv
-export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
-echo "deb [signed-by=/usr/share/keyrings/cloud.google.asc] https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | sudo tee /etc/apt/sources.list.d/gcsfuse.list
-curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo tee /usr/share/keyrings/cloud.google.asc
-sudo apt-get update && sudo apt-get install -y gcsfuse
-
-# 2. Clone this repository
-git clone https://github.com/ankdeshm/gemma-4-26b-a4b-tpu-v7x-inference.git
-cd gemma-4-26b-a4b-tpu-v7x-inference
-
-# 3. Install uv, vllm (for vllm bench serve), and huggingface_hub
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
-uv venv ~/.venv --python 3.12
-source ~/.venv/bin/activate
-uv pip install "vllm>=0.8.5" "huggingface_hub[cli,hf_transfer]" google-cloud-storage aiohttp
-
-# 4. Stage both Pure BF16 and FP8-Dynamic checkpoints directly to GCS
 export HF_TOKEN="<YOUR_HUGGINGFACE_TOKEN>"   # Must have accepted Google Gemma license on HF
-export GCS_BUCKET="<YOUR_GCS_BUCKET>"
 
 python3 scripts/stage_hf_to_gcs.py \
   --bucket "${GCS_BUCKET}" \
   --prefix models \
   --repos google/gemma-4-26B-A4B-it,RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic \
   --workers 8
-
-# 5. Also mount the GCS bucket locally on tpu-bench-client so vllm bench serve can read the tokenizer
-sudo mkdir -p /model-vol-mount
-sudo chown -R $USER:$USER /model-vol-mount
-gcsfuse --implicit-dirs "${GCS_BUCKET}" /model-vol-mount
 ```
 
 ---
 
-## 5. Step 4 — Provision TPU `v7x` (`tpu7x-standard-4t`) Using Your DWS Calendar Reservation
+## 5. Step 4 — Create GKE Standard Cluster & DWS Calendar Reservation Node Pool (`tpu7x`)
 
-First, verify your active DWS Calendar reservation name and available `tpu7x-standard-4t` count (`1` host = `4` chips, `2` hosts = `8` chips, `4` hosts = `16` chips):
+First, verify your approved DWS Calendar reservation name and status in `${ZONE}`:
 
 ```bash
 gcloud compute reservations list --project="${PROJECT_ID}"
 gcloud compute reservations describe "${RESERVATION_NAME}" --zone="${ZONE}"
 ```
 
-> **Critical GCE Image Note**: Standard `ubuntu-2404-lts` images do not include the TPU `v7x` VFIO driver rules out of the box. Always use the official accelerator image family:
-> - `--image-family=ubuntu-accel-2404-amd64-tpu-tpu7x`
-> - `--image-project=ubuntu-os-accelerator-images`
-> - `--network-interface=...,nic-type=GVNIC`
+### 5.1 Create the GKE Standard Cluster (`1.34+` / `1.36`)
 
-### Option A (Recommended): Create `1`, `2`, or `4` Standalone GCE VMs Bound to Your DWS Reservation
-
-Set `NUM_HOSTS=1` (`4` chips), `NUM_HOSTS=2` (`8` chips), or `NUM_HOSTS=4` (`16` chips):
+Enable **Dataplane V2**, **Image Streaming**, **GCSFuse CSI Driver**, **Workload Identity**, and **Ray Operator**:
 
 ```bash
-export NUM_HOSTS=4   # Set to 1 (4 chips), 2 (8 chips), or 4 (16 chips)
-
-for i in $(seq 1 "${NUM_HOSTS}"); do
-  gcloud compute instances create "tpu-v7x-node-${i}" \
-    --zone="${ZONE}" \
-    --machine-type=tpu7x-standard-4t \
-    --image-family=ubuntu-accel-2404-amd64-tpu-tpu7x \
-    --image-project=ubuntu-os-accelerator-images \
-    --boot-disk-size=200GB \
-    --boot-disk-type=pd-balanced \
-    --network-interface="network=${VPC_NAME},subnetwork=${SUBNET_NAME},nic-type=GVNIC,no-address" \
-    --provisioning-model=RESERVATION_BOUND \
-    --reservation-affinity=specific \
-    --reservation="${RESERVATION_NAME}" \
-    --maintenance-policy=TERMINATE \
-    --instance-termination-action=DELETE \
-    --service-account="${SA_EMAIL}" \
-    --scopes=https://www.googleapis.com/auth/cloud-platform \
-    --Async
-done
-
-# Wait until all TPU VMs report RUNNING and note their INTERNAL_IP addresses
-gcloud compute instances list --filter="name~'^tpu-v7x-node-'"
-```
-
-### Option B: Create a GCE Managed Instance Group (MIG) + Workload Policy (No GKE)
-
-If you prefer managing your hosts as a **GCE Managed Instance Group (MIG)** — or if you want GCE to co-locate `2` hosts (`2x2x2` = `8` chips) or `4` hosts (`2x2x4` = `16` chips) on the optical Inter-Chip Interconnect (ICI) fabric:
-
-```bash
-# 1. Create a Workload Policy (use 2x2x1 for 1 host, 2x2x2 for 2 hosts / 8 chips, or 2x2x4 for 4 hosts / 16 chips)
-gcloud compute resource-policies create workload-policy tpu-v7x-16c-policy \
-  --region="${REGION}" \
-  --type=HIGH_THROUGHPUT \
-  --accelerator-topology=2x2x4
-
-# 2. Create the Instance Template bound to your DWS Calendar Reservation
-gcloud compute instance-templates create tpu-v7x-dws-template \
-  --region="${REGION}" \
-  --machine-type=tpu7x-standard-4t \
-  --image-family=ubuntu-accel-2404-amd64-tpu-tpu7x \
-  --image-project=ubuntu-os-accelerator-images \
-  --boot-disk-size=200GB \
-  --boot-disk-type=pd-balanced \
-  --network-interface="network=${VPC_NAME},subnetwork=${SUBNET_NAME},nic-type=GVNIC,no-address" \
-  --provisioning-model=RESERVATION_BOUND \
-  --reservation-affinity=specific \
-  --reservation="projects/${PROJECT_ID}/zones/${ZONE}/reservations/${RESERVATION_NAME}" \
-  --maintenance-policy=TERMINATE \
-  --instance-termination-action=DELETE \
-  --service-account="${SA_EMAIL}" \
-  --scopes=https://www.googleapis.com/auth/cloud-platform
-
-# 3. Create the Zonal Managed Instance Group (size=4 for 16 chips)
-gcloud compute instance-groups managed create tpu-v7x-mig \
-  --zone="${ZONE}" \
-  --template=tpu-v7x-dws-template \
-  --size=4 \
-  --resource-policies=tpu-v7x-16c-policy
-
-# List the created VM names and internal IPs
-gcloud compute instance-groups managed list-instances tpu-v7x-mig --zone="${ZONE}"
-```
-
-### Option C (Optional): GKE Standard Cluster + DWS Calendar Node Pool
-
-Only use Option C if your team prefers Kubernetes manifests (`k8s/`) over GCE VMs:
-
-```bash
-gcloud container clusters create tpu-v7x-cluster \
-  --region="${REGION}" \
+gcloud container clusters create "${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" \
+  --location="${REGION}" \
+  --node-locations="${ZONE}" \
+  --cluster-version=latest \
   --network="${VPC_NAME}" \
   --subnetwork="${SUBNET_NAME}" \
   --enable-ip-alias \
   --enable-dataplane-v2 \
+  --enable-image-streaming \
   --workload-pool="${PROJECT_ID}.svc.id.goog" \
-  --addons=GcsFuseCsiDriver \
-  --num-nodes=1 \
-  --machine-type=e2-standard-8
+  --addons=GcsFuseCsiDriver,RayOperator \
+  --machine-type=n2-standard-16 \
+  --num-nodes=2 \
+  --service-account="${SA_EMAIL}" \
+  --scopes=https://www.googleapis.com/auth/cloud-platform
 
-gcloud container node-pools create tpu-v7x-dws-pool \
-  --cluster=tpu-v7x-cluster \
-  --region="${REGION}" \
+gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+  --location="${REGION}" \
+  --project="${PROJECT_ID}"
+```
+
+### 5.2 Grant Workload Identity Access to the GCS Bucket
+
+Allow Kubernetes Pods running under the `default` Kubernetes ServiceAccount to mount `gs://${GCS_BUCKET}` via the GCSFuse CSI driver:
+
+```bash
+gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
+  --member="principal://iam.googleapis.com/projects/$(gcloud projects describe ${PROJECT_ID} --format='value(projectNumber)')/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/default/sa/default" \
+  --role="roles/storage.objectAdmin"
+```
+
+### 5.3 Create the Ironwood (`tpu7x-standard-4t`) Node Pool Bound to Your DWS Calendar Reservation
+
+Per Google Cloud's official [Request TPUs with future reservation in calendar mode](https://cloud.google.com/kubernetes-engine/docs/how-to/tpu-calendar-mode) documentation, choose either a **Single-Host Slice Node Pool** (`2x2x1` = `4` chips per node, independent replicas) or a **Multi-Host Slice Node Pool** (`2x2x2` = `8` chips across 2 hosts, or `2x2x4` = `16` chips across 4 hosts):
+
+#### Option 5.3A — Single-Host TPU Slice Node Pool (`1`, `2`, or `4` Nodes x `4` Chips/Node for Scale-Out Serving)
+
+Because `google/gemma-4-26B-A4B-it` (`52 GB` in BF16, `28.7 GB` in FP8-Dynamic) fits inside a single 4-chip host (`768 GB` HBM3e) with `> 700 GB` of HBM3e for KV cache, a single-host node pool with `1`, `2`, or `4` nodes allows Kubernetes to schedule `1`, `2`, or `4` independent 4-chip Pod replicas (`TP=8, EP` or `TP=2, DP=4, EP`) behind a single Kubernetes `Service`:
+
+```bash
+gcloud container node-pools create tpu-v7x-singlehost-pool \
+  --project="${PROJECT_ID}" \
+  --cluster="${CLUSTER_NAME}" \
+  --location="${REGION}" \
   --node-locations="${ZONE}" \
   --machine-type=tpu7x-standard-4t \
   --num-nodes=4 \
@@ -341,179 +225,119 @@ gcloud container node-pools create tpu-v7x-dws-pool \
   --scopes=https://www.googleapis.com/auth/cloud-platform
 ```
 
----
+#### Option 5.3B — Multi-Host TPU Slice Node Pool (`2x2x2` = `8` Chips or `2x2x4` = `16` Chips with Workload Policy)
 
-## 6. Step 5 — Prepare Each GCE TPU VM & Launch the Gemma-4 Serving Recipe
-
-Run this step on **each** `tpu-v7x-node-{1..N}` VM (via `gcloud compute ssh tpu-v7x-node-1 --zone=${ZONE} --tunnel-through-iap`).
-
-### 6.1 One-Time TPU VM Setup (Install `gcsfuse` & Mount Bucket)
+On Ironwood (`tpu7x`), creating a multi-host TPU slice node pool requires first creating a regional **Compute Engine Workload Policy (`HIGH_THROUGHPUT`)** and attaching it with `--placement-policy` (which replaces `--tpu-topology` on `tpu7x`):
 
 ```bash
-# Verify 4 Ironwood TPU chips (8 TensorCores + SparseCores) are exposed via VFIO
-ls -la /dev/vfio
+# 1. Create the regional Workload Policy (use 2x2x2 for 2 hosts / 8 chips, or 2x2x4 for 4 hosts / 16 chips)
+gcloud compute resource-policies create workload-policy tpu-v7x-16c-policy \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --type=HIGH_THROUGHPUT \
+  --accelerator-topology=2x2x4
 
-# Clone the repo and mount your GCS bucket with 128MB read-ahead & metadata caching
-git clone https://github.com/ankdeshm/gemma-4-26b-a4b-tpu-v7x-inference.git
-cd gemma-4-26b-a4b-tpu-v7x-inference
-
-export GCS_BUCKET="<YOUR_GCS_BUCKET>"
-bash gce/launch_gce_tpu_v7x_gemma4_26b_a4b.sh install-deps
-bash gce/launch_gce_tpu_v7x_gemma4_26b_a4b.sh mount
+# 2. Create the multi-host TPU7x node pool consuming your DWS Calendar Reservation
+gcloud container node-pools create tpu-v7x-multihost-pool \
+  --project="${PROJECT_ID}" \
+  --cluster="${CLUSTER_NAME}" \
+  --location="${REGION}" \
+  --node-locations="${ZONE}" \
+  --machine-type=tpu7x-standard-4t \
+  --num-nodes=4 \
+  --reservation-affinity=specific \
+  --reservation="${RESERVATION_NAME}" \
+  --placement-policy=tpu-v7x-16c-policy \
+  --service-account="${SA_EMAIL}" \
+  --scopes=https://www.googleapis.com/auth/cloud-platform
 ```
 
-### 6.2 Choose and Launch Your Serving Profile on Each TPU VM (`:8000`)
-
-We provide turnkey modes for **both** **Pure BF16** (matching a strict `bfloat16` weights + `bfloat16` KV cache PoC requirement) and **FP8-Dynamic** (for maximum throughput and `< 450 ms` `22k`-input TTFT).
-
-#### Profile 1: Pure `bfloat16` Weights + `bfloat16` KV Cache (`google/gemma-4-26B-A4B-it`)
-
-* **1A — Pure BF16 on Public `vllm/vllm-tpu:latest` (JAX Flax NNX, `TP=2, DP=4`, BF16 KV):**
-  Works immediately using the public Docker Hub image `vllm/vllm-tpu:latest`:
-  ```bash
-  GCS_BUCKET="${GCS_BUCKET}" bash gce/launch_gce_tpu_v7x_gemma4_26b_a4b.sh serve-vllmtpu-bf16
-  ```
-* **1B — Pure BF16 on `vllm-torchtpu` (`TP=8, DP=1, EP` for Low-Latency `22k` Prefill, or `TP=2, DP=4, EP` for Throughput):**
-  ```bash
-  # Low-latency TP=8, EP=true (Pure BF16 weights + BF16 KV cache):
-  GCS_BUCKET="${GCS_BUCKET}" bash gce/launch_gce_tpu_v7x_gemma4_26b_a4b.sh serve-torchtpu-bf16-tp8
-
-  # Or High-throughput TP=2, DP=4, EP=true (Pure BF16 weights + BF16 KV cache):
-  GCS_BUCKET="${GCS_BUCKET}" bash gce/launch_gce_tpu_v7x_gemma4_26b_a4b.sh serve-torchtpu-bf16
-  ```
-
-#### Profile 2: FP8-Dynamic Weights + FP8 KV Cache (`RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic` or `vllm-tpu` FP8 KV)
-
-* **2A — Strict SLA Goodput Champion (`vllm-torchtpu` FP8-Dynamic, `TP=8, DP=1, EP=true`):**
-  Delivers **`446.7 ms` TTFT (`< 500 ms` SLA)** and **`4.50 ms` TPOT (`< 10 ms` SLA)** on `22,000`-token inputs (`100%` Goodput):
-  ```bash
-  GCS_BUCKET="${GCS_BUCKET}" bash gce/launch_gce_tpu_v7x_gemma4_26b_a4b.sh serve-torchtpu-fp8-tp8
-  ```
-* **2B — Peak Per-Chip Throughput Champion (`vllm-torchtpu` FP8-Dynamic, `TP=2, DP=4, EP=true`):**
-  Delivers **`5,327.5` output tok/s** on `22k/4k` and **`11,261.7` output tok/s (`2,815.4` tok/s/chip)** on `1k/1k` per 4-chip host:
-  ```bash
-  GCS_BUCKET="${GCS_BUCKET}" bash gce/launch_gce_tpu_v7x_gemma4_26b_a4b.sh serve-torchtpu-fp8
-  ```
-* **2C — Public `vllm/vllm-tpu:latest` JAX Flax NNX with FP8 KV Cache (`TP=2, DP=4`):**
-  ```bash
-  GCS_BUCKET="${GCS_BUCKET}" bash gce/launch_gce_tpu_v7x_gemma4_26b_a4b.sh serve-vllmtpu-fp8kv
-  ```
-
-Wait until each TPU VM logs `Application startup complete` on port `8000` (initial XLA compilation takes ~8–15 minutes and is cached in `gs://${GCS_BUCKET}/xla-cache/` so subsequent restarts take ~2 minutes).
-
----
-
-## 7. Step 6 — Multi-Host Load Balancing (`2` Hosts = `8` Chips, `4` Hosts = `16` Chips) & Running the Benchmarks
-
-Run all commands below from your **CPU Client VM (`tpu-bench-client`)**.
-
-### 7.1 Start the Multi-Host Load Balancer on `tpu-bench-client`
-
-Look up the internal IPs of your TPU VMs (`gcloud compute instances list --filter="name~'^tpu-v7x-node-'"`).
-
-* **For Single-Host (`4` chips)**: Point directly to `NODE_1_IP:8000` (`export LB_HOST=<NODE_1_IP> LB_PORT=8000`).
-* **For `2` Hosts (`8` chips) or `4` Hosts (`16` chips)**: Start `scripts/lb_proxy.py` (or NGINX `least_conn`) on port `8080` of `tpu-bench-client`:
+Verify that your TPU nodes are `Ready`:
 
 ```bash
-# Option 1: Lightweight async least_conn load balancer included in this repo
-python3 scripts/lb_proxy.py \
-  --listen 0.0.0.0:8080 \
-  --backends http://<NODE_1_IP>:8000,http://<NODE_2_IP>:8000,http://<NODE_3_IP>:8000,http://<NODE_4_IP>:8000 &
-
-export LB_HOST="127.0.0.1"
-export LB_PORT="8080"
-```
-
-<details>
-<summary><b>Alternative: NGINX <code>least_conn</code> Load Balancer Configuration</b></summary>
-
-```bash
-sudo tee /etc/nginx/conf.d/tpu_v7x_lb.conf << 'EOF'
-upstream tpu_v7x_backends {
-    least_conn;
-    server <NODE_1_IP>:8000 max_fails=0;
-    server <NODE_2_IP>:8000 max_fails=0;
-    # Uncomment for 4-host (16-chip) benchmarks:
-    # server <NODE_3_IP>:8000 max_fails=0;
-    # server <NODE_4_IP>:8000 max_fails=0;
-    keepalive 128;
-}
-
-server {
-    listen 8080;
-    location / {
-        proxy_pass http://tpu_v7x_backends;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_buffering off;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-        client_max_body_size 100M;
-    }
-}
-EOF
-sudo nginx -t && sudo systemctl restart nginx
-```
-</details>
-
-### 7.2 Execute the PoC Benchmark Suite (`22,000` Input / `4,000` Output & Smoke Tests)
-
-Run the turnkey benchmark sweep from `tpu-bench-client`:
-
-```bash
-GCS_BUCKET="${GCS_BUCKET}" LB_HOST="${LB_HOST}" LB_PORT="${LB_PORT}" \
-  bash gce/launch_gce_tpu_v7x_gemma4_26b_a4b.sh bench
-```
-
-Or run the individual `vllm bench serve` commands directly:
-
-```bash
-export TOKENIZER_PATH="/model-vol-mount/models/google/gemma-4-26B-A4B-it"
-
-# 1. Smoke Test (ISL=1024, OSL=21, Concurrency = 1, 8)
-for CON in 1 8; do
-  vllm bench serve --backend=vllm --dataset-name=random \
-    --random-input-len=1024 --random-output-len=21 --num-prompts=32 --ignore-eos \
-    --host="${LB_HOST}" --port="${LB_PORT}" --endpoint=/v1/completions \
-    --model=google/gemma-4-26B-A4B-it --tokenizer="${TOKENIZER_PATH}" \
-    --request-rate=inf --max-concurrency="${CON}" \
-    --percentile-metrics=ttft,tpot,itl,e2el --metric-percentiles=50,90,95,99 \
-    --goodput ttft:500 tpot:10 e2el:60000
-done
-
-# 2. Long-Context Closed-Loop Concurrency Sweep (ISL=22000, OSL=4000, CON = 1, 6, 16, 32, 64)
-for CON in 1 6 16 32 64; do
-  vllm bench serve --backend=vllm --dataset-name=random \
-    --random-input-len=22000 --random-output-len=4000 --num-prompts=50 --ignore-eos \
-    --host="${LB_HOST}" --port="${LB_PORT}" --endpoint=/v1/completions \
-    --model=google/gemma-4-26B-A4B-it --tokenizer="${TOKENIZER_PATH}" \
-    --request-rate=inf --max-concurrency="${CON}" \
-    --percentile-metrics=ttft,tpot,itl,e2el --metric-percentiles=50,90,95,99 \
-    --goodput ttft:500 tpot:10 e2el:60000 \
-    --save-result --result-dir=./results
-done
-
-# 3. Long-Context Open-Loop Poisson Arrival Sweep (ISL=22000, OSL=4000, RPS = 1, 2, 4, 6)
-for RPS in 1 2 4 6; do
-  vllm bench serve --backend=vllm --dataset-name=random \
-    --random-input-len=22000 --random-output-len=4000 --num-prompts=50 --ignore-eos \
-    --host="${LB_HOST}" --port="${LB_PORT}" --endpoint=/v1/completions \
-    --model=google/gemma-4-26B-A4B-it --tokenizer="${TOKENIZER_PATH}" \
-    --request-rate="${RPS}" \
-    --percentile-metrics=ttft,tpot,itl,e2el --metric-percentiles=50,90,95,99 \
-    --goodput ttft:500 tpot:10 e2el:60000 \
-    --save-result --result-dir=./results
-done
+kubectl get nodes -l cloud.google.com/gke-tpu-accelerator=tpu7x
 ```
 
 ---
 
-## 8. Common Pitfalls & Corrections Checklist
+## 6. Step 5 — Deploy `Gemma-4-26B-A4B-it` on GKE (`vllm-torchtpu` & `vllm-tpu`)
 
-| Area | Common Pitfall in Draft Docs | Validated Fix in This Repository |
-|---|---|---|
-| **GCE OS Image** | Using generic `--image-family=IMAGE_FAMILY` or standard Ubuntu images that lack TPU `v7x` VFIO permissions | Always specify `--image-family=ubuntu-accel-2404-amd64-tpu-tpu7x --image-project=ubuntu-os-accelerator-images` and `nic-type=GVNIC` |
-| **Docker TPU Device Access** | Running `python3 -m vllm...` without exposing VFIO devices or adequate shared memory | Pass `--privileged --net=host --shm-size=256g -v /dev/vfio:/dev/vfio -v /model-vol-mount:/model-vol-mount` to `docker run` |
-| **Pure BF16 vs. FP8 Precision** | Mixing up a pure `bfloat16` PoC requirement with `qwix` `float8_e4m3fn` + `--kv-cache-dtype=fp8` flags | Use `serve-vllmtpu-bf16` or `serve-torchtpu-bf16-tp8` (`--kv-cache-dtype=auto` on `google/gemma-4-26B-A4B-it`) for pure BF16, and `serve-torchtpu-fp8-tp8` for FP8-Dynamic |
-| **`22k` Input `< 500 ms` TTFT SLA** | Running `TP=2, DP=4` when optimizing for single-request `22,000`-token TTFT (`~1,023 ms` on 2 cores) | Use `TP=8, DP=1, --enable-expert-parallel` (`serve-torchtpu-fp8-tp8` or `serve-torchtpu-bf16-tp8`) to shard prefill across all `8` TensorCores (`446.7 ms` TTFT!) |
-| **Automated SLA Goodput Measurement** | Omitting `--goodput` from `vllm bench serve` and manually inspecting latency tables | Pass `--goodput ttft:500 tpot:10 e2el:60000` so `vllm bench serve` directly computes strict per-request Goodput (`req/s`) |
+### 6.1 Deploy `vllm-torchtpu` on GKE (`1`, `2`, or `4` Replicas = `4`, `8`, or `16` Ironwood Chips)
+
+`k8s/gemma-4-26b-a4b-vllm-torchtpu-v7x.yaml` deploys the `vllm-torchtpu` server with the GCSFuse CSI volume mount and exposes a Kubernetes `Service` on port `8000`:
+
+```bash
+# Set replicas to 1 (4 chips), 2 (8 chips), or 4 (16 chips)
+sed -e "s/<YOUR_GCS_BUCKET>/${GCS_BUCKET}/g" \
+    -e "s/<YOUR_PROJECT_ID>/${PROJECT_ID}/g" \
+    k8s/gemma-4-26b-a4b-vllm-torchtpu-v7x.yaml | kubectl apply -f -
+
+kubectl scale deployment/gemma4-26b-a4b-torchtpu-v7x --replicas=4
+kubectl rollout status deployment/gemma4-26b-a4b-torchtpu-v7x --timeout=30m
+```
+
+* **To switch between Pure `bfloat16` and `FP8-Dynamic`**:
+  - **Pure `bfloat16` (Exact PoC Scope — BF16 weights + BF16 KV cache)**: Set the model path in `k8s/gemma-4-26b-a4b-vllm-torchtpu-v7x.yaml` to `/model-vol-mount/models/google/gemma-4-26B-A4B-it` and `--kv-cache-dtype=auto` (with `--tensor-parallel-size=8 --data-parallel-size=1 --enable-expert-parallel` for **`511.2 ms` TTFT / `4.95 ms` TPOT**, or `--tensor-parallel-size=2 --data-parallel-size=4 --enable-expert-parallel` for **`4,291.5` out tok/s** on `22k/4k`).
+  - **FP8-Dynamic (Strict `< 500 ms` TTFT SLA & Peak Throughput)**: Keep `/model-vol-mount/models/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic` and `--kv-cache-dtype=fp8` (achieves **`446.7 ms` TTFT < `500 ms` SLA** and **`4.50 ms` TPOT < `10 ms` SLA** at `TP=8, EP`, or **`5,327.5` out tok/s** on `22k/4k` at `TP=2, DP=4, EP`).
+
+### 6.2 Alternative: Deploy `vllm-tpu` (JAX Flax NNX) on GKE
+
+```bash
+sed -e "s/<YOUR_GCS_BUCKET>/${GCS_BUCKET}/g" \
+    k8s/gemma-4-26b-a4b-vllm-tpu-jax-v7x.yaml | kubectl apply -f -
+```
+
+---
+
+## 7. Step 6 — Run the PoC Benchmark Suite on GKE (`22,000` Input / `4,000` Output)
+
+Run the benchmark client Pod on the CPU node pool (`n2-standard-16`) targeting the Kubernetes Service (`http://gemma4-26b-a4b-v7x-svc.default.svc.cluster.local:8000`):
+
+```bash
+kubectl run vllm-bench-client --rm -it --restart=Never \
+  --image=vllm/vllm-openai:latest \
+  --overrides='{"spec":{"nodeSelector":{"kubernetes.io/arch":"amd64"}}}' \
+  -- bash -c '
+    export SVC_HOST="gemma4-26b-a4b-v7x-svc.default.svc.cluster.local"
+    export SVC_PORT="8000"
+
+    # 1. Smoke Test (ISL=1024, OSL=21, CON=1, 8)
+    for CON in 1 8; do
+      vllm bench serve --backend=vllm --dataset-name=random \
+        --random-input-len=1024 --random-output-len=21 --num-prompts=32 --ignore-eos \
+        --host="${SVC_HOST}" --port="${SVC_PORT}" --endpoint=/v1/completions \
+        --model=google/gemma-4-26B-A4B-it \
+        --request-rate=inf --max-concurrency="${CON}" \
+        --percentile-metrics=ttft,tpot,itl,e2el --metric-percentiles=50,90,95,99 \
+        --goodput ttft:500 tpot:10 e2el:60000
+    done
+
+    # 2. Long-Context Closed-Loop Concurrency Sweep (ISL=22000, OSL=4000, CON=1, 6, 16, 32, 64)
+    for CON in 1 6 16 32 64; do
+      vllm bench serve --backend=vllm --dataset-name=random \
+        --random-input-len=22000 --random-output-len=4000 --num-prompts=50 --ignore-eos \
+        --host="${SVC_HOST}" --port="${SVC_PORT}" --endpoint=/v1/completions \
+        --model=google/gemma-4-26B-A4B-it \
+        --request-rate=inf --max-concurrency="${CON}" \
+        --percentile-metrics=ttft,tpot,itl,e2el --metric-percentiles=50,90,95,99 \
+        --goodput ttft:500 tpot:10 e2el:60000
+    done
+
+    # 3. Long-Context Open-Loop Poisson Arrival Sweep (ISL=22000, OSL=4000, RPS=1, 2, 4, 6)
+    for RPS in 1 2 4 6; do
+      vllm bench serve --backend=vllm --dataset-name=random \
+        --random-input-len=22000 --random-output-len=4000 --num-prompts=50 --ignore-eos \
+        --host="${SVC_HOST}" --port="${SVC_PORT}" --endpoint=/v1/completions \
+        --model=google/gemma-4-26B-A4B-it \
+        --request-rate="${RPS}" \
+        --percentile-metrics=ttft,tpot,itl,e2el --metric-percentiles=50,90,95,99 \
+        --goodput ttft:500 tpot:10 e2el:60000
+    done
+  '
+```
+
+---
+
+## 8. Appendix: Optional Single-Host (`1` VM = `4` Chips) GCE Quick Test
+
+If you only want to test a **single host (`1 x tpu7x-standard-4t` = `4` chips)** without setting up a multi-host workload, you can bind a single GCE VM to your reservation using the official `tpu7x` accelerator image family (`ubuntu-accel-2404-amd64-tpu-tpu7x` in `ubuntu-os-accelerator-images`) and run [`gce/launch_gce_tpu_v7x_gemma4_26b_a4b.sh`](gce/launch_gce_tpu_v7x_gemma4_26b_a4b.sh). **For any multi-host (`8`-chip or `16`-chip) or production benchmark, use the GKE workflow in Steps 4–7 above.**
