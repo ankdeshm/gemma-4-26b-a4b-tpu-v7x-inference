@@ -1,0 +1,157 @@
+---
+# PersistentVolume & PVC backed by Cloud Storage FUSE (ReadWriteMany)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: tpu-v7x-models-pv
+spec:
+  accessModes: ["ReadWriteMany"]
+  capacity:
+    storage: 10Ti
+  storageClassName: tpu-gcsfuse-sc
+  mountOptions:
+    - implicit-dirs
+    - metadata-cache:ttl-secs:-1
+    - metadata-cache:stat-cache-max-size-mb:-1
+    - metadata-cache:type-cache-max-size-mb:-1
+    - file-cache:max-size-mb:-1
+    - file-system:kernel-list-cache-ttl-secs:-1
+    - read_ahead_kb=131072
+  csi:
+    driver: gcsfuse.csi.storage.gke.io
+    volumeHandle: <YOUR_GCS_BUCKET>
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tpu-v7x-models-pvc
+  namespace: default
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: tpu-gcsfuse-sc
+  volumeName: tpu-v7x-models-pv
+  resources:
+    requests:
+      storage: 10Ti
+---
+# 4 x tpu7x-standard-4t (16 physical Ironwood chips = 32 TensorCores) Deployment
+# Scale `replicas` to 1 (4 chips), 2 (8 chips), or 4 (16 chips) to match slice capacity.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gemma4-26b-a4b-torchtpu-v7x
+  namespace: default
+  labels:
+    app: gemma4-26b-a4b-v7x
+    engine: vllm-torchtpu
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: gemma4-26b-a4b-v7x
+  template:
+    metadata:
+      labels:
+        app: gemma4-26b-a4b-v7x
+        engine: vllm-torchtpu
+      annotations:
+        gke-gcsfuse/volumes: "true"
+        gke-gcsfuse/cpu-limit: "0"
+        gke-gcsfuse/memory-limit: "0"
+        gke-gcsfuse/ephemeral-storage-limit: "0"
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+        cloud.google.com/gke-tpu-topology: 2x2x1
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm-server
+          image: us-central1-docker.pkg.dev/<YOUR_PROJECT_ID>/vllm/vllm-torchtpu-bench:v0.32.0
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              # Low-Latency SLA Profile: --tensor-parallel-size=8 --data-parallel-size=1 --max-num-batched-tokens=24576
+              # Peak-Throughput Profile: --tensor-parallel-size=2 --data-parallel-size=4 --api-server-count=1 --max-num-batched-tokens=16384
+              mkdir -p /models/xla-cache/torchtpu-gemma4-fp8-tp8 /dev/shm/torch_tpu_tier3
+              exec vllm serve /models/models/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic \
+                --served-model-name google/gemma-4-26B-A4B-it \
+                --host 0.0.0.0 \
+                --port 8000 \
+                --tensor-parallel-size=8 \
+                --data-parallel-size=1 \
+                --enable-expert-parallel \
+                --attention-backend CUSTOM \
+                --max-model-len=32768 \
+                --max-num-batched-tokens=24576 \
+                --max-num-seqs=128 \
+                --async-scheduling \
+                --no-enable-prefix-caching \
+                --gpu-memory-utilization=0.90 \
+                --kv-cache-dtype=fp8 \
+                --block-size=256 \
+                --language-model-only \
+                --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}' \
+                --hf-overrides '{"architectures":["Gemma4ForCausalLM"]}'
+          env:
+            - name: PJRT_DEVICE
+              value: "TPU"
+            - name: USE_MOE_SPARSE_CORE
+              value: "1"
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "2400"
+            - name: VLLM_XLA_CACHE_PATH
+              value: "/models/xla-cache/torchtpu-gemma4-fp8-tp8"
+            - name: TORCH_TPU_TIER3_ROOT
+              value: "/dev/shm/torch_tpu_tier3"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+          ports:
+            - containerPort: 8000
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 15
+          resources:
+            requests:
+              google.com/tpu: "4"
+              cpu: "110"
+              memory: "420Gi"
+            limits:
+              google.com/tpu: "4"
+          volumeMounts:
+            - name: models-gcs
+              mountPath: /models
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: models-gcs
+          persistentVolumeClaim:
+            claimName: tpu-v7x-models-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemma4-26b-a4b-service
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: gemma4-26b-a4b-v7x
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

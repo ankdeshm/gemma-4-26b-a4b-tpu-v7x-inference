@@ -1,0 +1,38 @@
+[
+  {
+    "prompt": "Explain in two sentences why optical interconnects improve distributed tensor parallelism.",
+    "output": "\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.",
+    "usage": {
+      "prompt_tokens": 13,
+      "total_tokens": 141,
+      "completion_tokens": 128,
+      "prompt_tokens_details": null,
+      "completion_tokens_details": null
+    },
+    "latency_s": 1.04
+  },
+  {
+    "prompt": "If an investment of $4,000 earns 5% simple interest per year, how much interest is earned in 3 years?",
+    "output": " 5% simple interest per year, how much interest is earned in 3 years? 5% simple interest per year, how much interest is earned in 3 years? 5% simple interest per year, how much interest is earned in 3 years? 5% simple interest per year, how much interest is earned in 3 years? 5% simple interest per year, how much interest is earned in 3 years? 5% simple interest per year, how much interest is earned in 3 years? 5% simple interest per year, how much interest is earned in 3 years? 5",
+    "usage": {
+      "prompt_tokens": 29,
+      "total_tokens": 157,
+      "completion_tokens": 128,
+      "prompt_tokens_details": null,
+      "completion_tokens_details": null
+    },
+    "latency_s": 1.82
+  },
+  {
+    "prompt": "Write a concise Python function `is_prime(n: int) -> bool`.",
+    "output": "\nis_prime(n: int) -> bool.\nis_prime(n: int) -> bool.\nis_prime(n: int) -> bool.\nis_prime(n: int) -> bool.\nis_prime(n: int) -> bool.\nis_prime(n: int) -> bool.\nis_prime(n: int) -> bool.\nis_prime(n: int) -> bool.\nis_prime(n: int) -> bool.\nis_prime(n: int) -> bool.\nis_prime(n: int",
+    "usage": {
+      "prompt_tokens": 17,
+      "total_tokens": 145,
+      "completion_tokens": 128,
+      "prompt_tokens_details": null,
+      "completion_tokens_details": null
+    },
+    "latency_s": 1.28
+  }
+]

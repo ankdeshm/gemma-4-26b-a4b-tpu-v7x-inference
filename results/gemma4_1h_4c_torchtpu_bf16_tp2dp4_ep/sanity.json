@@ -1,0 +1,38 @@
+[
+  {
+    "prompt": "Explain in two sentences why optical interconnects improve distributed tensor parallelism.",
+    "output": "\n\n---\n\n### It is a bit of a word to help in the case of a bit of a word to help in the case of a bit of a word to help in the case of a bit of a word to help in the case of a bit of a word to help in the case of a bit of a word to help in the case of a bit of a word to help in the case of a bit of a word to help in the case of a bit of a word to help in the case of a bit of a word to help in the case of a bit of a word to help in the case of a",
+    "usage": {
+      "prompt_tokens": 13,
+      "total_tokens": 141,
+      "completion_tokens": 128,
+      "prompt_tokens_details": null,
+      "completion_tokens_details": null
+    },
+    "latency_s": 1.0
+  },
+  {
+    "prompt": "If an investment of $4,000 earns 5% simple interest per year, how much interest is earned in 3 years?",
+    "output": "\n1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+    "usage": {
+      "prompt_tokens": 29,
+      "total_tokens": 157,
+      "completion_tokens": 128,
+      "prompt_tokens_details": null,
+      "completion_tokens_details": null
+    },
+    "latency_s": 1.77
+  },
+  {
+    "prompt": "Write a concise Python function `is_prime(n: int) -> bool`.",
+    "output": "\n\n\n\ub85c\uc9c1\uc744 ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran ran",
+    "usage": {
+      "prompt_tokens": 17,
+      "total_tokens": 145,
+      "completion_tokens": 128,
+      "prompt_tokens_details": null,
+      "completion_tokens_details": null
+    },
+    "latency_s": 1.15
+  }
+]

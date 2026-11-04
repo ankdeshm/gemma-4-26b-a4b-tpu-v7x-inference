@@ -1,0 +1,187 @@
+{
+  "name": "gemma4_4h_16c_torchtpu_bf16_tp2dp4_ep",
+  "model_family": "google/gemma-4-26B-A4B-it",
+  "framework": "vllm-torchtpu (4x single-host replicas + least_conn LB)",
+  "precision": "bf16 weights, bf16 kv",
+  "topology": "4 hosts (16 chips / 32 TensorCores), 4x (TP=2, DP=4, EP=true)",
+  "hosts": 4,
+  "chips": 16,
+  "served_model": "google/gemma-4-26B-A4B-it",
+  "tokenizer_dir": "/dev/shm/models/gemma-4-26B-A4B-it",
+  "stage": [],
+  "cells": [
+    {
+      "suite": "smoke",
+      "isl": 1024,
+      "osl": 21,
+      "concurrency": 1,
+      "num_prompts": 32,
+      "rps": "inf"
+    },
+    {
+      "suite": "smoke",
+      "isl": 1024,
+      "osl": 21,
+      "concurrency": 8,
+      "num_prompts": 64,
+      "rps": "inf"
+    },
+    {
+      "suite": "smoke",
+      "isl": 1024,
+      "osl": 21,
+      "concurrency": 32,
+      "num_prompts": 128,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_cl",
+      "isl": 22000,
+      "osl": 4000,
+      "concurrency": 1,
+      "num_prompts": 10,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_cl",
+      "isl": 22000,
+      "osl": 4000,
+      "concurrency": 6,
+      "num_prompts": 48,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_cl",
+      "isl": 22000,
+      "osl": 4000,
+      "concurrency": 16,
+      "num_prompts": 64,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_cl",
+      "isl": 22000,
+      "osl": 4000,
+      "concurrency": 32,
+      "num_prompts": 80,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_cl",
+      "isl": 22000,
+      "osl": 4000,
+      "concurrency": 64,
+      "num_prompts": 96,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_cl",
+      "isl": 22000,
+      "osl": 4000,
+      "concurrency": 128,
+      "num_prompts": 128,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_ol",
+      "isl": 22000,
+      "osl": 4000,
+      "rps": 1.0,
+      "num_prompts": 48
+    },
+    {
+      "suite": "long_ol",
+      "isl": 22000,
+      "osl": 4000,
+      "rps": 2.0,
+      "num_prompts": 56
+    },
+    {
+      "suite": "long_ol",
+      "isl": 22000,
+      "osl": 4000,
+      "rps": 4.0,
+      "num_prompts": 60
+    },
+    {
+      "suite": "long_ol",
+      "isl": 22000,
+      "osl": 4000,
+      "rps": 6.0,
+      "num_prompts": 60
+    },
+    {
+      "suite": "ref_1k1k",
+      "isl": 1024,
+      "osl": 1024,
+      "concurrency": 8,
+      "num_prompts": 64,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_1k1k",
+      "isl": 1024,
+      "osl": 1024,
+      "concurrency": 32,
+      "num_prompts": 128,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_1k1k",
+      "isl": 1024,
+      "osl": 1024,
+      "concurrency": 64,
+      "num_prompts": 192,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_1k1k",
+      "isl": 1024,
+      "osl": 1024,
+      "concurrency": 128,
+      "num_prompts": 256,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_1k1k",
+      "isl": 1024,
+      "osl": 1024,
+      "concurrency": 256,
+      "num_prompts": 512,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_8k1k",
+      "isl": 8192,
+      "osl": 1024,
+      "concurrency": 8,
+      "num_prompts": 48,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_8k1k",
+      "isl": 8192,
+      "osl": 1024,
+      "concurrency": 32,
+      "num_prompts": 96,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_8k1k",
+      "isl": 8192,
+      "osl": 1024,
+      "concurrency": 64,
+      "num_prompts": 128,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_8k1k",
+      "isl": 8192,
+      "osl": 1024,
+      "concurrency": 128,
+      "num_prompts": 256,
+      "rps": "inf"
+    }
+  ],
+  "keep_server_alive": false
+}

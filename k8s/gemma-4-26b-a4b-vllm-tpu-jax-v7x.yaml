@@ -1,0 +1,123 @@
+---
+# 4 x tpu7x-standard-4t (16 physical Ironwood chips = 32 TensorCores) Deployment
+# Engine: vllm-tpu (JAX / Flax NNX) — supports both BF16 KV (--kv-cache-dtype=auto)
+# and FP8 KV (--kv-cache-dtype=fp8) with BF16 weights.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gemma4-26b-a4b-vllm-tpu-v7x
+  namespace: default
+  labels:
+    app: gemma4-26b-a4b-vllm-tpu
+    engine: vllm-tpu-jax
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: gemma4-26b-a4b-vllm-tpu
+  template:
+    metadata:
+      labels:
+        app: gemma4-26b-a4b-vllm-tpu
+        engine: vllm-tpu-jax
+      annotations:
+        gke-gcsfuse/volumes: "true"
+        gke-gcsfuse/cpu-limit: "0"
+        gke-gcsfuse/memory-limit: "0"
+        gke-gcsfuse/ephemeral-storage-limit: "0"
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+        cloud.google.com/gke-tpu-topology: 2x2x1
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm-server
+          image: vllm/vllm-tpu:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              mkdir -p /models/xla-cache/vllm-tpu-gemma4-tp2dp4
+              exec python3 -m vllm.entrypoints.openai.api_server \
+                --host=0.0.0.0 \
+                --port=8000 \
+                --seed=42 \
+                --model=/models/models/google/gemma-4-26B-A4B-it \
+                --served-model-name=google/gemma-4-26B-A4B-it \
+                --max-model-len=32768 \
+                --max-num-seqs=256 \
+                --data-parallel-size=4 \
+                --tensor-parallel-size=2 \
+                --max-num-batched-tokens=16384 \
+                --enable-chunked-prefill \
+                --no-enable-prefix-caching \
+                --trust-remote-code \
+                --kv-cache-dtype=fp8 \
+                --gpu-memory-utilization=0.90 \
+                --async-scheduling \
+                --limit-mm-per-prompt='{"image": 0, "video": 0, "audio": 0}' \
+                --block-size=256
+          env:
+            - name: TPU_BACKEND_TYPE
+              value: "jax"
+            - name: MODEL_IMPL_TYPE
+              value: "flax_nnx"
+            - name: TPU_MULTIPROCESS_DP
+              value: "1"
+            - name: USE_BATCHED_RPA_KERNEL
+              value: "1"
+            - name: JAX_GC_POST_COMPILE
+              value: "true"
+            - name: JAX_THREE_PHASE_DEALLOCATION
+              value: "true"
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "2400"
+            - name: VLLM_XLA_CACHE_PATH
+              value: "/models/xla-cache/vllm-tpu-gemma4-tp2dp4"
+          ports:
+            - containerPort: 8000
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 15
+          resources:
+            requests:
+              google.com/tpu: "4"
+              cpu: "110"
+              memory: "420Gi"
+            limits:
+              google.com/tpu: "4"
+          volumeMounts:
+            - name: models-gcs
+              mountPath: /models
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: models-gcs
+          persistentVolumeClaim:
+            claimName: tpu-v7x-models-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemma4-26b-a4b-vllm-tpu-service
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: gemma4-26b-a4b-vllm-tpu
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

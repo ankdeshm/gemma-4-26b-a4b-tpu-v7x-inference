@@ -1,0 +1,217 @@
+{
+  "name": "gemma4_1h_4c_vllmtpu_bf16w_fp8kv_tp2dp4",
+  "model_family": "google/gemma-4-26B-A4B-it",
+  "framework": "vllm-tpu (JAX / Flax NNX)",
+  "precision": "bf16 weights, fp8 kv",
+  "topology": "1 host (4 chips / 8 TensorCores), TP=2, DP=4",
+  "hosts": 1,
+  "chips": 4,
+  "port": 8000,
+  "ready_timeout_s": 2400,
+  "keep_server_alive": false,
+  "tpu_env_mode": "gke_single_host",
+  "served_model": "google/gemma-4-26B-A4B-it",
+  "tokenizer_dir": "/dev/shm/models/gemma-4-26B-A4B-it",
+  "stage": [
+    {
+      "src": "/models/models/google/gemma-4-26B-A4B-it",
+      "dst": "/dev/shm/models/gemma-4-26B-A4B-it"
+    }
+  ],
+  "mkdirs": [
+    "/models/xla-cache/vllm-tpu-gemma4-bf16w-fp8kv-tp2dp4"
+  ],
+  "env": {
+    "TPU_BACKEND_TYPE": "jax",
+    "MODEL_IMPL_TYPE": "flax_nnx",
+    "TPU_MULTIPROCESS_DP": "1",
+    "USE_BATCHED_RPA_KERNEL": "1",
+    "JAX_GC_POST_COMPILE": "true",
+    "JAX_THREE_PHASE_DEALLOCATION": "true",
+    "VLLM_ENGINE_READY_TIMEOUT_S": "2400",
+    "VLLM_XLA_CACHE_PATH": "/models/xla-cache/vllm-tpu-gemma4-bf16w-fp8kv-tp2dp4",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1"
+  },
+  "argv": [
+    "python3",
+    "-m",
+    "vllm.entrypoints.openai.api_server",
+    "--host=0.0.0.0",
+    "--port=8000",
+    "--seed=42",
+    "--model=/dev/shm/models/gemma-4-26B-A4B-it",
+    "--served-model-name=google/gemma-4-26B-A4B-it",
+    "--max-model-len=32768",
+    "--max-num-seqs=256",
+    "--data-parallel-size=4",
+    "--tensor-parallel-size=2",
+    "--max-num-batched-tokens=16384",
+    "--enable-chunked-prefill",
+    "--no-enable-prefix-caching",
+    "--trust-remote-code",
+    "--kv-cache-dtype=fp8",
+    "--gpu-memory-utilization=0.90",
+    "--async-scheduling",
+    "--limit-mm-per-prompt={\"image\": 0, \"video\": 0, \"audio\": 0}",
+    "--block-size=256"
+  ],
+  "cells": [
+    {
+      "suite": "smoke",
+      "isl": 1024,
+      "osl": 21,
+      "concurrency": 1,
+      "num_prompts": 32,
+      "rps": "inf"
+    },
+    {
+      "suite": "smoke",
+      "isl": 1024,
+      "osl": 21,
+      "concurrency": 8,
+      "num_prompts": 32,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_cl",
+      "isl": 22000,
+      "osl": 4000,
+      "concurrency": 6,
+      "num_prompts": 50,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_cl",
+      "isl": 22000,
+      "osl": 4000,
+      "concurrency": 16,
+      "num_prompts": 50,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_cl",
+      "isl": 22000,
+      "osl": 4000,
+      "concurrency": 32,
+      "num_prompts": 50,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_cl",
+      "isl": 22000,
+      "osl": 4000,
+      "concurrency": 64,
+      "num_prompts": 64,
+      "rps": "inf"
+    },
+    {
+      "suite": "long_ol",
+      "isl": 22000,
+      "osl": 4000,
+      "rps": 1.0,
+      "num_prompts": 50
+    },
+    {
+      "suite": "long_ol",
+      "isl": 22000,
+      "osl": 4000,
+      "rps": 2.0,
+      "num_prompts": 50
+    },
+    {
+      "suite": "long_ol",
+      "isl": 22000,
+      "osl": 4000,
+      "rps": 4.0,
+      "num_prompts": 50
+    },
+    {
+      "suite": "long_ol",
+      "isl": 22000,
+      "osl": 4000,
+      "rps": 6.0,
+      "num_prompts": 50
+    },
+    {
+      "suite": "long_cl",
+      "isl": 22000,
+      "osl": 4000,
+      "concurrency": 1,
+      "num_prompts": 25,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_1k1k",
+      "isl": 1024,
+      "osl": 1024,
+      "concurrency": 1,
+      "num_prompts": 32,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_1k1k",
+      "isl": 1024,
+      "osl": 1024,
+      "concurrency": 8,
+      "num_prompts": 64,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_1k1k",
+      "isl": 1024,
+      "osl": 1024,
+      "concurrency": 32,
+      "num_prompts": 128,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_1k1k",
+      "isl": 1024,
+      "osl": 1024,
+      "concurrency": 64,
+      "num_prompts": 192,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_1k1k",
+      "isl": 1024,
+      "osl": 1024,
+      "concurrency": 128,
+      "num_prompts": 256,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_8k1k",
+      "isl": 8192,
+      "osl": 1024,
+      "concurrency": 1,
+      "num_prompts": 24,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_8k1k",
+      "isl": 8192,
+      "osl": 1024,
+      "concurrency": 8,
+      "num_prompts": 48,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_8k1k",
+      "isl": 8192,
+      "osl": 1024,
+      "concurrency": 32,
+      "num_prompts": 96,
+      "rps": "inf"
+    },
+    {
+      "suite": "ref_8k1k",
+      "isl": 8192,
+      "osl": 1024,
+      "concurrency": 64,
+      "num_prompts": 128,
+      "rps": "inf"
+    }
+  ]
+}
