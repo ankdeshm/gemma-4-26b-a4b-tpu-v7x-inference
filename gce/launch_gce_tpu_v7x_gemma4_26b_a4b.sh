@@ -1,36 +1,98 @@
 #!/usr/bin/env bash
 # Turnkey GCE TPU v7x (tpu7x-standard-4t) Serving & Benchmark Recipe
-# Model: google/gemma-4-26B-A4B-it
+# Model: google/gemma-4-26B-A4B-it (Pure BF16 & FP8-Dynamic)
 # Supports 1 host (4 chips), 2 hosts (8 chips), or 4 hosts (16 chips) + c2-standard-16 Client VM.
 set -euo pipefail
 
 GCS_BUCKET="${GCS_BUCKET:?Set GCS_BUCKET=<YOUR_GCS_BUCKET>}"
 MODEL_SUBPATH="${MODEL_SUBPATH:-models/google/gemma-4-26B-A4B-it}"
+FP8_MODEL_SUBPATH="${FP8_MODEL_SUBPATH:-models/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic}"
 XLA_CACHE_SUBPATH="${XLA_CACHE_SUBPATH:-xla-cache/gemma-4-26b-a4b}"
 MOUNT_DIR="${MOUNT_DIR:-/model-vol-mount}"
+VLLM_TPU_IMAGE="${VLLM_TPU_IMAGE:-vllm/vllm-tpu:latest}"
+TORCHTPU_IMAGE="${TORCHTPU_IMAGE:-us-central1-docker.pkg.dev/<YOUR_PROJECT_ID>/vllm/vllm-torchtpu-bench:v0.32.0}"
 MODE="${1:-help}"
+
+install_deps() {
+  sudo apt-get update && sudo apt-get install -y curl git jq fuse3 ca-certificates
+  if ! command -v gcsfuse >/dev/null 2>&1; then
+    local codename
+    codename="$(lsb_release -c -s)"
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.asc] https://packages.cloud.google.com/apt gcsfuse-${codename} main" \
+      | sudo tee /etc/apt/sources.list.d/gcsfuse.list
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo tee /usr/share/keyrings/cloud.google.asc >/dev/null
+    sudo apt-get update && sudo apt-get install -y gcsfuse
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    curl -fsSL https://get.docker.com | sudo sh
+  fi
+  sudo usermod -aG docker "${USER}" || true
+  gcloud auth configure-docker us-central1-docker.pkg.dev --quiet || true
+}
 
 mount_gcsfuse() {
   sudo mkdir -p "${MOUNT_DIR}"
-  gcsfuse --implicit-dirs \
-    -o allow_other \
-    --stat-cache-max-size-mb=-1 \
-    --type-cache-max-size-mb=-1 \
-    --kernel-list-cache-ttl-secs=-1 \
-    --enable-buffered-read \
-    --read-ahead-kb=131072 \
-    "${GCS_BUCKET}" "${MOUNT_DIR}"
+  sudo chown -R "${USER}:${USER}" "${MOUNT_DIR}" || true
+  if mountpoint -q "${MOUNT_DIR}"; then
+    echo "${MOUNT_DIR} is already mounted."
+  else
+    gcsfuse --implicit-dirs \
+      -o allow_other \
+      --stat-cache-max-size-mb=-1 \
+      --type-cache-max-size-mb=-1 \
+      --kernel-list-cache-ttl-secs=-1 \
+      --enable-buffered-read \
+      --read-ahead-kb=131072 \
+      "${GCS_BUCKET}" "${MOUNT_DIR}"
+  fi
   mkdir -p "${MOUNT_DIR}/${XLA_CACHE_SUBPATH}"
 }
 
+# Profile 1A: Pure BF16 weights + BF16 KV cache on public vllm/vllm-tpu:latest (JAX Flax NNX, TP=2, DP=4)
+serve_vllm_tpu_bf16() {
+  sudo docker run --rm --privileged --net=host --shm-size=256g \
+    -v /dev/vfio:/dev/vfio \
+    -v "${MOUNT_DIR}:/model-vol-mount" \
+    -e TPU_BACKEND_TYPE=jax \
+    -e MODEL_IMPL_TYPE=flax_nnx \
+    -e TPU_MULTIPROCESS_DP=1 \
+    -e USE_BATCHED_RPA_KERNEL=1 \
+    -e JAX_GC_POST_COMPILE=true \
+    -e JAX_THREE_PHASE_DEALLOCATION=true \
+    -e VLLM_ENGINE_READY_TIMEOUT_S=2400 \
+    -e VLLM_XLA_CACHE_PATH="/model-vol-mount/${XLA_CACHE_SUBPATH}-jax-bf16" \
+    "${VLLM_TPU_IMAGE}" \
+    python3 -m vllm.entrypoints.openai.api_server \
+      --host=0.0.0.0 \
+      --port=8000 \
+      --seed=42 \
+      --model="/model-vol-mount/${MODEL_SUBPATH}" \
+      --served-model-name=google/gemma-4-26B-A4B-it \
+      --max-model-len=32768 \
+      --max-num-seqs=128 \
+      --data-parallel-size=4 \
+      --tensor-parallel-size=2 \
+      --max-num-batched-tokens=16384 \
+      --enable-chunked-prefill \
+      --no-enable-prefix-caching \
+      --trust-remote-code \
+      --kv-cache-dtype=auto \
+      --gpu-memory-utilization=0.90 \
+      --async-scheduling \
+      --limit-mm-per-prompt='{"image": 0, "video": 0, "audio": 0}' \
+      --block-size=256
+}
+
+# Profile 1B: Pure BF16 weights + BF16 KV cache on vllm-torchtpu (TP=2, DP=4, EP=true)
 serve_vllm_torchtpu_bf16() {
-  docker run --rm --privileged --net=host --shm-size=256g \
+  sudo docker run --rm --privileged --net=host --shm-size=256g \
+    -v /dev/vfio:/dev/vfio \
     -v "${MOUNT_DIR}:/model-vol-mount" \
     -e PJRT_DEVICE=TPU \
     -e USE_MOE_SPARSE_CORE=1 \
     -e VLLM_ENGINE_READY_TIMEOUT_S=2400 \
-    -e VLLM_XLA_CACHE_PATH="/model-vol-mount/${XLA_CACHE_SUBPATH}" \
-    "us-central1-docker.pkg.dev/<YOUR_PROJECT_ID>/vllm/vllm-torchtpu-bench:v0.32.0" \
+    -e VLLM_XLA_CACHE_PATH="/model-vol-mount/${XLA_CACHE_SUBPATH}-bf16-tp2dp4" \
+    "${TORCHTPU_IMAGE}" \
     vllm serve "/model-vol-mount/${MODEL_SUBPATH}" \
       --served-model-name google/gemma-4-26B-A4B-it \
       --host 0.0.0.0 \
@@ -53,19 +115,51 @@ serve_vllm_torchtpu_bf16() {
       --hf-overrides '{"architectures":["Gemma4ForCausalLM"]}'
 }
 
+# Profile 1C: Pure BF16 weights + BF16 KV cache on vllm-torchtpu (TP=8, DP=1, EP=true for low-latency 22k TTFT)
+serve_vllm_torchtpu_bf16_tp8() {
+  sudo docker run --rm --privileged --net=host --shm-size=256g \
+    -v /dev/vfio:/dev/vfio \
+    -v "${MOUNT_DIR}:/model-vol-mount" \
+    -e PJRT_DEVICE=TPU \
+    -e USE_MOE_SPARSE_CORE=1 \
+    -e VLLM_ENGINE_READY_TIMEOUT_S=2400 \
+    -e VLLM_XLA_CACHE_PATH="/model-vol-mount/${XLA_CACHE_SUBPATH}-bf16-tp8" \
+    "${TORCHTPU_IMAGE}" \
+    vllm serve "/model-vol-mount/${MODEL_SUBPATH}" \
+      --served-model-name google/gemma-4-26B-A4B-it \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --tensor-parallel-size=8 \
+      --data-parallel-size=1 \
+      --enable-expert-parallel \
+      --attention-backend CUSTOM \
+      --max-model-len=32768 \
+      --max-num-batched-tokens=24576 \
+      --max-num-seqs=128 \
+      --async-scheduling \
+      --no-enable-prefix-caching \
+      --gpu-memory-utilization=0.90 \
+      --kv-cache-dtype=auto \
+      --block-size=256 \
+      --language-model-only \
+      --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}' \
+      --hf-overrides '{"architectures":["Gemma4ForCausalLM"]}'
+}
+
+# Profile 2A: FP8-Dynamic weights + FP8 KV cache on vllm-torchtpu (TP=2, DP=4, EP=true — Peak Throughput)
 serve_vllm_torchtpu_fp8() {
-  local fp8_subpath="${FP8_MODEL_SUBPATH:-models/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic}"
   local repo_root
   repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  docker run --rm --privileged --net=host --shm-size=256g \
+  sudo docker run --rm --privileged --net=host --shm-size=256g \
+    -v /dev/vfio:/dev/vfio \
     -v "${MOUNT_DIR}:/model-vol-mount" \
     -v "${repo_root}/scripts/patches/core_map_helper.py:/workspace/vllm-torchtpu/src/vllm_torchtpu/kernels/sparse_core/core_map_helper.py:ro" \
     -e PJRT_DEVICE=TPU \
     -e USE_MOE_SPARSE_CORE=1 \
     -e VLLM_ENGINE_READY_TIMEOUT_S=2400 \
     -e VLLM_XLA_CACHE_PATH="/model-vol-mount/${XLA_CACHE_SUBPATH}-fp8-tp2dp4" \
-    "us-central1-docker.pkg.dev/<YOUR_PROJECT_ID>/vllm/vllm-torchtpu-bench:v0.32.0" \
-    vllm serve "/model-vol-mount/${fp8_subpath}" \
+    "${TORCHTPU_IMAGE}" \
+    vllm serve "/model-vol-mount/${FP8_MODEL_SUBPATH}" \
       --served-model-name google/gemma-4-26B-A4B-it \
       --host 0.0.0.0 \
       --port 8000 \
@@ -87,19 +181,20 @@ serve_vllm_torchtpu_fp8() {
       --hf-overrides '{"architectures":["Gemma4ForCausalLM"]}'
 }
 
+# Profile 2B: FP8-Dynamic weights + FP8 KV cache on vllm-torchtpu (TP=8, DP=1, EP=true — Strict <500ms TTFT SLA)
 serve_vllm_torchtpu_fp8_tp8() {
-  local fp8_subpath="${FP8_MODEL_SUBPATH:-models/RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic}"
   local repo_root
   repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  docker run --rm --privileged --net=host --shm-size=256g \
+  sudo docker run --rm --privileged --net=host --shm-size=256g \
+    -v /dev/vfio:/dev/vfio \
     -v "${MOUNT_DIR}:/model-vol-mount" \
     -v "${repo_root}/scripts/patches/core_map_helper.py:/workspace/vllm-torchtpu/src/vllm_torchtpu/kernels/sparse_core/core_map_helper.py:ro" \
     -e PJRT_DEVICE=TPU \
     -e USE_MOE_SPARSE_CORE=1 \
     -e VLLM_ENGINE_READY_TIMEOUT_S=2400 \
     -e VLLM_XLA_CACHE_PATH="/model-vol-mount/${XLA_CACHE_SUBPATH}-fp8-tp8" \
-    "us-central1-docker.pkg.dev/<YOUR_PROJECT_ID>/vllm/vllm-torchtpu-bench:v0.32.0" \
-    vllm serve "/model-vol-mount/${fp8_subpath}" \
+    "${TORCHTPU_IMAGE}" \
+    vllm serve "/model-vol-mount/${FP8_MODEL_SUBPATH}" \
       --served-model-name google/gemma-4-26B-A4B-it \
       --host 0.0.0.0 \
       --port 8000 \
@@ -120,8 +215,10 @@ serve_vllm_torchtpu_fp8_tp8() {
       --hf-overrides '{"architectures":["Gemma4ForCausalLM"]}'
 }
 
+# Profile 2C: Public vllm/vllm-tpu:latest (JAX Flax NNX, TP=2, DP=4, FP8 KV cache)
 serve_vllm_tpu_fp8kv() {
-  docker run --rm --privileged --net=host --shm-size=256g \
+  sudo docker run --rm --privileged --net=host --shm-size=256g \
+    -v /dev/vfio:/dev/vfio \
     -v "${MOUNT_DIR}:/model-vol-mount" \
     -e TPU_BACKEND_TYPE=jax \
     -e MODEL_IMPL_TYPE=flax_nnx \
@@ -131,7 +228,7 @@ serve_vllm_tpu_fp8kv() {
     -e JAX_THREE_PHASE_DEALLOCATION=true \
     -e VLLM_ENGINE_READY_TIMEOUT_S=2400 \
     -e VLLM_XLA_CACHE_PATH="/model-vol-mount/${XLA_CACHE_SUBPATH}-jax" \
-    vllm/vllm-tpu:latest \
+    "${VLLM_TPU_IMAGE}" \
     python3 -m vllm.entrypoints.openai.api_server \
       --host=0.0.0.0 \
       --port=8000 \
@@ -194,14 +291,17 @@ run_client_benchmarks() {
 }
 
 case "${MODE}" in
+  install-deps) install_deps ;;
   mount) mount_gcsfuse ;;
+  serve-vllmtpu-bf16) serve_vllm_tpu_bf16 ;;
   serve-torchtpu-bf16) serve_vllm_torchtpu_bf16 ;;
+  serve-torchtpu-bf16-tp8) serve_vllm_torchtpu_bf16_tp8 ;;
   serve-torchtpu-fp8) serve_vllm_torchtpu_fp8 ;;
   serve-torchtpu-fp8-tp8) serve_vllm_torchtpu_fp8_tp8 ;;
   serve-vllmtpu-fp8kv) serve_vllm_tpu_fp8kv ;;
   bench) run_client_benchmarks ;;
   *)
-    echo "Usage: GCS_BUCKET=<YOUR_GCS_BUCKET> $0 {mount|serve-torchtpu-bf16|serve-torchtpu-fp8|serve-torchtpu-fp8-tp8|serve-vllmtpu-fp8kv|bench}"
+    echo "Usage: GCS_BUCKET=<YOUR_GCS_BUCKET> $0 {install-deps|mount|serve-vllmtpu-bf16|serve-torchtpu-bf16|serve-torchtpu-bf16-tp8|serve-torchtpu-fp8|serve-torchtpu-fp8-tp8|serve-vllmtpu-fp8kv|bench}"
     exit 1
     ;;
 esac
