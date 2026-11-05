@@ -13,41 +13,44 @@ Complete Wave 1 (`1 Host = 4 Chips`, 6 serving stacks) and Wave 2 (`2 Hosts = 8 
   - **TTFT**: `<= 500 ms`
   - **TPOT**: `<= 10 ms` (`>= 100 tok/s` per stream)
   - **End-to-End Latency (E2EL)**: `<= 60,000 ms` (`60 s`, including `4,000`-token generation)
+- **Precision Scope**: BF16 weights with a BF16 KV cache (`google/gemma-4-26B-A4B-it`) are the primary configuration. FP8-Dynamic (`RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic`, FP8 KV) and BF16-weight + FP8-KV results are optional (non-BF16) and are labeled as such.
+- **Sample Size (`n`)**: `n` is `--num-prompts` for a cell; every request completed (`0` failed), so `n` also equals the completed-request count in the §5 tables. The customer workload specifies `n=50`; on 1 host the `22k / 4k` cells used `n=25` at `CON=1`, `n=64` at `CON=64` and `n=50` otherwise, and the 2- and 4-host `22k / 4k` cells used `n=10–128`.
+- **Derived Values**: in the benchmark tables, ratios, percentages and per-chip throughput (out tok/s ÷ chips) are computed from the raw cells and are marked as derived; all other throughput and latency numbers are raw `vllm bench serve` fields from `results/`.
 
 ---
 
 ## 2. Wave 1: Single-Host (`1 Host = 4 Chips = 8 TensorCores`) Architecture Matrix
 
-| Stack & Topology (`4` Ironwood Chips) | `22k / 4k` `CON=1` TTFT / TPOT P50 | `22k / 4k` `CON=1` Goodput (`req/s`) | `22k / 4k` `CON=64` Out tok/s | `22k / 4k` `6 RPS` Out tok/s (E2E P50) | `1k / 1k` `CON=128` Out tok/s | `8k / 1k` `CON=64` Out tok/s |
+| Stack & Topology (`4` Ironwood Chips) | `22k / 4k` `CON=1` TTFT / TPOT P50 (`n=25`) | `22k / 4k` `CON=1` Goodput (`req/s`) | `22k / 4k` `CON=64` Out tok/s (`n=64`) | `22k / 4k` `6 RPS` Out tok/s (E2E P50) (`n=50`) | `1k / 1k` `CON=128` Out tok/s (`n=256`) | `8k / 1k` `CON=64` Out tok/s (`n=128`) |
 |---|---:|---:|---:|---:|---:|---:|
-| `vllm-torchtpu` FP8-Dynamic `TP=8, DP=1, EP=true` | `446.7 ms` / `4.50 ms` | `0.054` | **`3,319.8`** | `3,022.5` (`61.79 s`) | **`8,121.9`** | `3,626.4` |
-| `vllm-torchtpu` FP8-Dynamic `TP=2, DP=4, EP=true` | `1,023.7 ms` / `5.99 ms` | `0.000` | **`5,327.5`** | `4,788.6` (`37.45 s`) | **`11,261.7`** | `5,165.0` |
 | `vllm-torchtpu` BF16 `TP=8, DP=1, EP=true` | `443.0 ms` / `4.71 ms` | `0.052` | **`3,199.5`** | `2,889.9` (`64.82 s`) | **`7,609.9`** | `3,525.0` |
 | `vllm-torchtpu` BF16 `TP=2, DP=4, EP=true` | `1,068.1 ms` / `6.00 ms` | `0.000` | **`4,994.0`** | `4,455.5` (`40.58 s`) | **`10,940.1`** | `4,828.9` |
-| `vllm-tpu` (JAX Flax NNX) BF16w + FP8 KV `TP=2, DP=4` | `427.1 ms` / `11.56 ms` | `0.000` | **`4,512.9`** | `3,366.4` (`54.58 s`) | **`8,463.3`** | `4,297.4` |
 | `vllm-tpu` (JAX Flax NNX) BF16w + BF16 KV `TP=2, DP=4` | `441.6 ms` / `11.87 ms` | `0.000` | **`4,337.9`** | `3,287.9` (`56.14 s`) | **`8,851.9`** | `4,126.7` |
+| `vllm-torchtpu` FP8-Dynamic `TP=8, DP=1, EP=true` — optional (non-BF16) | `446.7 ms` / `4.50 ms` | `0.054` | **`3,319.8`** | `3,022.5` (`61.79 s`) | **`8,121.9`** | `3,626.4` |
+| `vllm-torchtpu` FP8-Dynamic `TP=2, DP=4, EP=true` — optional (non-BF16) | `1,023.7 ms` / `5.99 ms` | `0.000` | **`5,327.5`** | `4,788.6` (`37.45 s`) | **`11,261.7`** | `5,165.0` |
+| `vllm-tpu` (JAX Flax NNX) BF16w + FP8 KV `TP=2, DP=4` — optional (non-BF16) | `427.1 ms` / `11.56 ms` | `0.000` | **`4,512.9`** | `3,366.4` (`54.58 s`) | **`8,463.3`** | `4,297.4` |
 
 ### Key Engineering Findings from Wave 1
-1. **`vllm-torchtpu` + `USE_MOE_SPARSE_CORE=1` (`--enable-expert-parallel`) unlocks sub-10ms TPOT**: Offloading MoE expert routing/dispatch onto Ironwood's SparseCores cuts `22k/4k` decode TPOT from `11.56–13.41 ms` (`vllm-tpu` JAX without EP) down to **`4.50 ms` (`TP=8, EP`)** and **`5.99–8.97 ms` (`TP=2, DP=4, EP`)**.
-2. **`FP8-Dynamic` (`RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic` + `--kv-cache-dtype=fp8`) boosts throughput while improving latency**:
-   - On `TP=2, DP=4, EP`: `FP8-Dynamic` increases `22k/4k` peak output throughput from `4,461.4` (BF16) to **`5,327.5` output tok/s** (`+19.4%`) and `1k/1k` output throughput to **`11,261.7` output tok/s (`2,815.4` tok/s/chip)**!
-   - On `TP=8, DP=1, EP`: `FP8-Dynamic` achieves **`446.7 ms` TTFT P50**, **`4.50 ms` TPOT P50**, and **`18.44 s` E2E P50** on `22,000 / 4,000` (`100%` simultaneous SLA Goodput!), and even sustains positive strict SLA Goodput (`0.057 req/s`, `TTFT P50 = 459.5 ms`) under Open-Loop `1.0 RPS` Poisson arrivals.
+1. **`vllm-torchtpu` + `USE_MOE_SPARSE_CORE=1` (`--enable-expert-parallel`) unlocks sub-10ms TPOT**: Offloading MoE expert routing/dispatch onto Ironwood's SparseCores cuts `22k/4k` `CON=1` decode TPOT P50 from `11.87 ms` (`vllm-tpu` JAX BF16 without EP) down to **`4.71 ms`** (BF16, `TP=8, EP`) and **`6.00 ms`** (BF16, `TP=2, DP=4, EP`); FP8-Dynamic (optional, non-BF16): `4.50 ms` and `5.99 ms`.
+2. **`FP8-Dynamic` (`RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic` + `--kv-cache-dtype=fp8`; optional, non-BF16) raises throughput**:
+   - On `TP=2, DP=4, EP`: `FP8-Dynamic` increases `22k/4k` peak output throughput from `4,994.0` (BF16) to **`5,327.5` output tok/s** (both `CON=64`; `+6.7%`, derived) and `1k/1k` output throughput from `10,940.1` to **`11,261.7` output tok/s** (both `CON=128`; `2,815.4` tok/s/chip, derived).
+   - On `TP=8, DP=1, EP`: `FP8-Dynamic` achieves **`446.7 ms` TTFT P50**, **`4.50 ms` TPOT P50**, and **`18.44 s` E2E P50** on `22,000 / 4,000` at `CON=1` (`n=25`, `100%` simultaneous SLA goodput; BF16 weights on the same layout: `443.0 ms` / `4.71 ms` / `19.27 s`, also `100%`), and sustains positive strict SLA Goodput (`0.057 req/s`, `TTFT P50 = 459.5 ms`) under Open-Loop `1.0 RPS` Poisson arrivals.
 
 ---
 
-## 3. Wave 2: Multi-Host Horizontal Scaling (`1`, `2`, and `4` Hosts — `FP8-Dynamic TP=8, EP`)
+## 3. Wave 2 — Optional (non-BF16): Multi-Host Horizontal Scaling (`1`, `2`, and `4` Hosts — `FP8-Dynamic TP=8, EP`)
 
 Independent 4-chip single-host `vllm-torchtpu` (`FP8-Dynamic, TP=8, DP=1, EP=true`) replicas fronted by `scripts/lb_proxy.py` (`least_conn`, `0` errors across all runs):
 
-| Workload (`ISL : OSL`) | Metric | `1 Host` (`4` Chips) | `2 Hosts` (`8` Chips) | `4 Hosts` (`16` Chips) | `4-Host` vs `1-Host` Scaling |
-|---|---|---:|---:|---:|---:|
-| **`22,000 : 4,000`** (`CON=1`) | TTFT P50 / TPOT P50 / E2E P50 | `446.7 ms` / `4.50 ms` / `18.44 s` | `446.5 ms` / `4.41 ms` / `18.07 s` | **`447.1 ms` / `4.44 ms` / `18.22 s`** | **`100%` SLA Goodput** |
-| **`22,000 : 4,000`** (`CON=16`) | Output Throughput (`tok/s`) & TPOT P50 | `1,886.4` (`6.26 ms`) | `2,766.0` (`5.25 ms`) | **`3,100.1`** (**`4.72 ms`**) | Sub-6ms TPOT |
-| **`22,000 : 4,000`** (Peak CL) | Peak Output Throughput (`tok/s`) | `3,319.8` (`CON=64`) | `4,657.2` (`CON=64`) | **`10,903.5`** (`CON=128`) | **`3.28x`** |
-| **`22,000 : 4,000`** (`RPS=6.0`) | Open-Loop Out Throughput (`Strict Goodput`) | `3,022.5` (`0.000 req/s`) | `5,459.3` (`0.091 req/s`) | **`7,313.2`** (**`1.585 req/s`**) | **`2.42x`** |
-| **`1,024 : 1,024`** (Peak) | Output Throughput (`tok/s`) | `8,121.9` (`CON=128`) | `16,024.7` (`CON=256`) | **`21,411.8`** (`CON=256`) | **`2.64x`** |
-| **`1,024 : 1,024`** (SLA) | Strict SLA Goodput (`req/s`) | `1.786` | `5.831` | **`10.884`** | **`6.09x`** |
-| **`8,192 : 1,024`** (Peak) | Output / Total Throughput (`tok/s`) | `3,626.4` / `32,637.9` | `7,191.4` / `64,722.8` | **`12,016.8` / `108,150.8`** | **`3.31x`** |
+| Workload (`ISL : OSL`) | Metric | `1 Host` (`4` Chips) | `2 Hosts` (`8` Chips) | `4 Hosts` (`16` Chips) | `4-Host` / `1-Host` (derived, highest vs highest) | `n` (1 / 2 / 4 Hosts) |
+|---|---|---:|---:|---:|---:|---:|
+| **`22,000 : 4,000`** (`CON=1`) | TTFT P50 / TPOT P50 / E2E P50 | `446.7 ms` / `4.50 ms` / `18.44 s` | `446.5 ms` / `4.41 ms` / `18.07 s` | **`447.1 ms` / `4.44 ms` / `18.22 s`** | `100%` SLA goodput at all three scales | `25 / 10 / 10` |
+| **`22,000 : 4,000`** (`CON=16`) | Output Throughput (`tok/s`) & TPOT P50 | `1,886.4` (`6.26 ms`) | `2,766.0` (`5.25 ms`) | **`3,100.1`** (**`4.72 ms`**) | Sub-6ms TPOT | `50 / 64 / 64` |
+| **`22,000 : 4,000`** (Peak CL) | Peak Output Throughput (`tok/s`) | `3,319.8` (`CON=64`) | `4,657.2` (`CON=64`) | **`10,903.5`** (`CON=128`) | **`3.28x`** | `64 / 96 / 128` |
+| **`22,000 : 4,000`** (`RPS=6.0`) | Open-Loop Out Throughput (`Strict Goodput`) | `3,022.5` (`0.000 req/s`) | `5,459.3` (`0.091 req/s`) | **`7,313.2`** (**`1.585 req/s`**) | **`2.42x`** | `50 / 60 / 60` |
+| **`1,024 : 1,024`** (Peak) | Output Throughput (`tok/s`) | `8,121.9` (`CON=128`) | `16,024.7` (`CON=256`) | **`21,411.8`** (`CON=256`) | **`2.64x`** | `256 / 512 / 512` |
+| **`1,024 : 1,024`** (SLA) | Strict SLA Goodput (`req/s`) | `1.786` (`CON=32`) | `5.831` (`CON=32`) | **`10.884`** (`CON=64`) | **`6.09x`** | `128 / 128 / 192` |
+| **`8,192 : 1,024`** (Peak) | Output / Total Throughput (`tok/s`) | `3,626.4` / `32,637.9` (`CON=64`) | `7,191.4` / `64,722.8` (`CON=128`) | **`12,016.8` / `108,150.8`** (`CON=128`) | **`3.31x`** | `128 / 256 / 256` |
 
 ---
 
@@ -66,9 +69,9 @@ Independent 4-chip single-host `vllm-torchtpu` (`FP8-Dynamic, TP=8, DP=1, EP=tru
 
 ### `gemma4_1h_4c_torchtpu_fp8dyn_tp8_ep`
 - **Model**: `google/gemma-4-26B-A4B-it` | **Framework**: `vllm-torchtpu (RedHatAI FP8-Dynamic)`
-- **Precision**: `fp8-dynamic weights, fp8 kv` | **Topology**: `1 host (4 chips / 8 TensorCores), TP=8, DP=1, EP=true` (`4` physical `tpu7x` chips)
+- **Precision**: `fp8-dynamic weights, fp8 kv` — optional (non-BF16) | **Topology**: `1 host (4 chips / 8 TensorCores), TP=8, DP=1, EP=true` (`4` physical `tpu7x` chips)
 
-| Suite | ISL : OSL | Load | Done | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
+| Suite | ISL : OSL | Load | n | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip (derived) | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `smoke` | `1,024 : 21` | `CON=1` | `32` | `4.528` | `4.387` | **`95.1`** | **`23.8`** | `4,732.0` | `32.0 / 36.5 / 2,143.6` | `4.65 / 4.85 / 4.94` | `4.69 / 5.09` | `0.13 / 0.13` | PASS (All) |
 | `smoke` | `1,024 : 21` | `CON=8` | `32` | `22.549` | `15.503` | **`473.5`** | **`118.4`** | `23,564.2` | `161.3 / 415.9 / 416.3` | `4.93 / 14.32 / 21.39` | `4.88 / 6.68` | `0.32 / 0.52` | Partial (TTFT+E2E) |
@@ -93,9 +96,9 @@ Independent 4-chip single-host `vllm-torchtpu` (`FP8-Dynamic, TP=8, DP=1, EP=tru
 
 ### `gemma4_2h_8c_torchtpu_fp8dyn_tp8_ep`
 - **Model**: `google/gemma-4-26B-A4B-it` | **Framework**: `vllm-torchtpu (2x single-host replicas + least_conn LB)`
-- **Precision**: `fp8-dynamic weights, fp8 kv` | **Topology**: `2 hosts (8 chips / 16 TensorCores), 2x (TP=8, DP=1, EP=true)` (`8` physical `tpu7x` chips)
+- **Precision**: `fp8-dynamic weights, fp8 kv` — optional (non-BF16) | **Topology**: `2 hosts (8 chips / 16 TensorCores), 2x (TP=8, DP=1, EP=true)` (`8` physical `tpu7x` chips)
 
-| Suite | ISL : OSL | Load | Done | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
+| Suite | ISL : OSL | Load | n | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip (derived) | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `smoke` | `1,024 : 21` | `CON=1` | `32` | `4.643` | `4.497` | **`97.5`** | **`12.2`** | `4,851.5` | `32.2 / 60.8 / 2,152.6` | `4.26 / 4.64 / 4.86` | `4.25 / 5.06` | `0.12 / 0.15` | PASS (All) |
 | `smoke` | `1,024 : 21` | `CON=8` | `64` | `38.997` | `38.387` | **`818.9`** | **`102.4`** | `40,751.6` | `96.4 / 108.5 / 283.5` | `4.55 / 7.68 / 10.97` | `4.51 / 5.28` | `0.19 / 0.35` | PASS (All) |
@@ -121,9 +124,9 @@ Independent 4-chip single-host `vllm-torchtpu` (`FP8-Dynamic, TP=8, DP=1, EP=tru
 
 ### `gemma4_4h_16c_torchtpu_fp8dyn_tp8_ep`
 - **Model**: `google/gemma-4-26B-A4B-it` | **Framework**: `vllm-torchtpu (4x single-host replicas + least_conn LB)`
-- **Precision**: `fp8-dynamic weights, fp8 kv` | **Topology**: `4 hosts (16 chips / 32 TensorCores), 4x (TP=8, DP=1, EP=true)` (`16` physical `tpu7x` chips)
+- **Precision**: `fp8-dynamic weights, fp8 kv` — optional (non-BF16) | **Topology**: `4 hosts (16 chips / 32 TensorCores), 4x (TP=8, DP=1, EP=true)` (`16` physical `tpu7x` chips)
 
-| Suite | ISL : OSL | Load | Done | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
+| Suite | ISL : OSL | Load | n | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip (derived) | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `smoke` | `1,024 : 21` | `CON=1` | `32` | `3.059` | `2.868` | **`64.2`** | **`4.0`** | `3,196.4` | `35.6 / 1,458.6 / 3,206.6` | `4.33 / 4.90 / 9.65` | `4.38 / 5.07` | `0.12 / 1.55` | Partial (TPOT+E2E) |
 | `smoke` | `1,024 : 21` | `CON=8` | `64` | `45.472` | `44.051` | **`954.9`** | **`59.7`** | `47,518.2` | `44.5 / 79.0 / 274.2` | `4.96 / 6.16 / 15.76` | `4.47 / 5.31` | `0.16 / 0.33` | PASS (All) |
@@ -150,9 +153,9 @@ Independent 4-chip single-host `vllm-torchtpu` (`FP8-Dynamic, TP=8, DP=1, EP=tru
 
 ### `gemma4_1h_4c_torchtpu_fp8dyn_tp2dp4_ep`
 - **Model**: `google/gemma-4-26B-A4B-it` | **Framework**: `vllm-torchtpu (RedHatAI FP8-Dynamic)`
-- **Precision**: `fp8-dynamic weights, fp8 kv` | **Topology**: `1 host (4 chips / 8 TensorCores), TP=2, DP=4, EP=true` (`4` physical `tpu7x` chips)
+- **Precision**: `fp8-dynamic weights, fp8 kv` — optional (non-BF16) | **Topology**: `1 host (4 chips / 8 TensorCores), TP=2, DP=4, EP=true` (`4` physical `tpu7x` chips)
 
-| Suite | ISL : OSL | Load | Done | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
+| Suite | ISL : OSL | Load | n | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip (derived) | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `smoke` | `1,024 : 21` | `CON=1` | `32` | `1.794` | `1.570` | **`37.7`** | **`9.4`** | `1,874.8` | `59.9 / 3,016.9 / 3,048.9` | `5.95 / 7.00 / 11.05` | `5.99 / 7.84` | `0.18 / 3.17` | Partial (TPOT+E2E) |
 | `smoke` | `1,024 : 21` | `CON=8` | `32` | `16.353` | `3.577` | **`343.4`** | **`85.9`** | `17,089.2` | `207.1 / 475.9 / 477.5` | `10.61 / 22.91 / 25.46` | `7.17 / 76.67` | `0.48 / 0.63` | Partial (TTFT+E2E) |
@@ -179,7 +182,7 @@ Independent 4-chip single-host `vllm-torchtpu` (`FP8-Dynamic, TP=8, DP=1, EP=tru
 - **Model**: `google/gemma-4-26B-A4B-it` | **Framework**: `vllm-torchtpu`
 - **Precision**: `bf16 weights, bf16 kv` | **Topology**: `1 host (4 chips / 8 TensorCores), TP=2, DP=4, EP=true` (`4` physical `tpu7x` chips)
 
-| Suite | ISL : OSL | Load | Done | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
+| Suite | ISL : OSL | Load | n | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip (derived) | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `smoke` | `1,024 : 21` | `CON=1` | `32` | `1.845` | `1.614` | **`38.7`** | **`9.7`** | `1,927.6` | `57.8 / 2,930.9 / 3,034.5` | `5.84 / 7.36 / 10.91` | `5.90 / 6.12` | `0.18 / 3.10` | Partial (TPOT+E2E) |
 | `smoke` | `1,024 : 21` | `CON=8` | `32` | `14.392` | `5.397` | **`302.2`** | **`75.6`** | `15,039.7` | `314.9 / 504.6 / 562.6` | `11.82 / 27.59 / 29.88` | `6.27 / 74.16` | `0.57 / 0.82` | Partial (E2E) |
@@ -206,7 +209,7 @@ Independent 4-chip single-host `vllm-torchtpu` (`FP8-Dynamic, TP=8, DP=1, EP=tru
 - **Model**: `google/gemma-4-26B-A4B-it` | **Framework**: `vllm-torchtpu`
 - **Precision**: `bf16 weights, bf16 kv` | **Topology**: `1 host (4 chips / 8 TensorCores), TP=8, DP=1, EP=true` (`4` physical `tpu7x` chips)
 
-| Suite | ISL : OSL | Load | Done | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
+| Suite | ISL : OSL | Load | n | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip (derived) | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `smoke` | `1,024 : 21` | `CON=1` | `32` | `4.538` | `4.396` | **`95.3`** | **`23.8`** | `4,742.1` | `31.9 / 66.7 / 2,147.9` | `4.54 / 4.70 / 4.79` | `4.60 / 4.81` | `0.12 / 0.16` | PASS (All) |
 | `smoke` | `1,024 : 21` | `CON=8` | `32` | `22.230` | `15.978` | **`466.8`** | **`116.7`** | `23,230.4` | `198.2 / 299.9 / 311.0` | `7.35 / 14.80 / 17.99` | `4.73 / 9.39` | `0.37 / 0.46` | Partial (TTFT+E2E) |
@@ -231,9 +234,9 @@ Independent 4-chip single-host `vllm-torchtpu` (`FP8-Dynamic, TP=8, DP=1, EP=tru
 
 ### `gemma4_1h_4c_vllmtpu_bf16w_fp8kv_tp2dp4`
 - **Model**: `google/gemma-4-26B-A4B-it` | **Framework**: `vllm-tpu (JAX / Flax NNX)`
-- **Precision**: `bf16 weights, fp8 kv` | **Topology**: `1 host (4 chips / 8 TensorCores), TP=2, DP=4` (`4` physical `tpu7x` chips)
+- **Precision**: `bf16 weights, fp8 kv` — optional (non-BF16) | **Topology**: `1 host (4 chips / 8 TensorCores), TP=2, DP=4` (`4` physical `tpu7x` chips)
 
-| Suite | ISL : OSL | Load | Done | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
+| Suite | ISL : OSL | Load | n | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip (derived) | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `smoke` | `1,024 : 21` | `CON=1` | `32` | `3.371` | `0.000` | **`70.8`** | **`17.7`** | `3,522.7` | `36.2 / 311.7 / 314.7` | `11.29 / 11.35 / 11.39` | `11.33 / 12.07` | `0.26 / 0.54` | Partial (TTFT+E2E) |
 | `smoke` | `1,024 : 21` | `CON=8` | `32` | `18.537` | `0.000` | **`389.3`** | **`97.3`** | `19,371.2` | `69.5 / 339.0 / 455.4` | `13.12 / 17.82 / 18.18` | `11.45 / 35.49` | `0.38 / 0.59` | Partial (TTFT+E2E) |
@@ -260,7 +263,7 @@ Independent 4-chip single-host `vllm-torchtpu` (`FP8-Dynamic, TP=8, DP=1, EP=tru
 - **Model**: `google/gemma-4-26B-A4B-it` | **Framework**: `vllm-tpu (JAX / Flax NNX)`
 - **Precision**: `bf16 weights, bf16 kv` | **Topology**: `1 host (4 chips / 8 TensorCores), TP=2, DP=4` (`4` physical `tpu7x` chips)
 
-| Suite | ISL : OSL | Load | Done | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
+| Suite | ISL : OSL | Load | n | Req/s | Goodput (req/s) | Out tok/s | Out tok/s/chip (derived) | Total tok/s | TTFT P50 / P95 / P99 (ms) | TPOT P50 / P95 / P99 (ms) | ITL P50 / P95 (ms) | E2E P50 / P95 (s) | SLA Status (P95) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `smoke` | `1,024 : 21` | `CON=1` | `32` | `3.321` | `0.000` | **`69.7`** | **`17.4`** | `3,470.5` | `36.8 / 322.0 / 351.7` | `11.39 / 11.47 / 11.48` | `11.46 / 12.07` | `0.26 / 0.55` | Partial (TTFT+E2E) |
 | `smoke` | `1,024 : 21` | `CON=8` | `32` | `16.205` | `0.000` | **`340.3`** | **`85.1`** | `16,934.3` | `81.1 / 394.1 / 470.1` | `13.69 / 18.53 / 18.84` | `11.59 / 36.87` | `0.42 / 0.64` | Partial (TTFT+E2E) |
