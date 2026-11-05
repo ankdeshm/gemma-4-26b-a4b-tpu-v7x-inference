@@ -54,14 +54,24 @@ Independent 4-chip single-host `vllm-torchtpu` (`FP8-Dynamic, TP=8, DP=1, EP=tru
 
 ---
 
-## 4. Capacity Sizing Guide for Sustained `6.0 RPS` on `22,000 / 4,000` (`24,000` out tok/s)
+## 4. Measured SLA Goodput at `22,000 / 4,000`
 
-1. **Throughput-Optimal (`TPOT <= 10 ms`, `E2EL <= 60 s`) — `vllm-torchtpu` `FP8-Dynamic TP=2, DP=4, EP=true`**:
-   - Each 4-chip host sustains **`1.197 req/s` (`4,788.6 out tok/s`, `TPOT P50 = 8.48 ms`, `E2EL P50 = 37.45 s`)** under Open-Loop `6.0 RPS` and **`1.332 req/s` (`5,327.5 out tok/s`, `TPOT P50 = 8.97 ms`, `E2EL P50 = 47.94 s`)** in closed loop.
-   - **Recommended Fleet**: **`5`–`6` `tpu7x` hosts (`20`–`24` chips)** behind `least_conn` load balancing to sustain `6.0 RPS` (`24,000+ out tok/s`) with `< 9 ms` TPOT P50 and `< 40 s` E2EL P50.
-2. **Strict Sub-500ms TTFT + Sub-7ms TPOT — `vllm-torchtpu` `FP8-Dynamic TP=8, DP=1, EP=true`**:
-   - Directly measured at `4 Hosts (16 Chips)`: **`2.726 req/s` (`10,903.5 out tok/s`, `TPOT P50 = 9.62 ms`, `E2E P50 = 44.99 s`)** at Closed-Loop `CON=128`, and **`1.828 req/s` (`7,313.2 out tok/s`) with `1.585 req/s` (`86.7%`) strict simultaneous `TTFT <= 500 ms` + `TPOT <= 10 ms` + `E2EL <= 60 s` Goodput** (`TTFT P50 = 443.5 ms`, `TPOT P50 = 6.25 ms`, `E2E P50 = 25.43 s`) at Open-Loop `6.0 RPS` (and `100%` strict Goodput at `1.153 req/s` / `4,613.3 out tok/s` under Open-Loop `2.0 RPS`).
-   - **Recommended Fleet**: **`9`–`10` `tpu7x` hosts (`36`–`40` chips)** for throughput-saturated `TP=8` serving, or **`13`–`16` `tpu7x` hosts (`52`–`64` chips, `4x` 4-host pods)** to sustain `6.0 RPS` (`24,000+ out tok/s`) while simultaneously meeting **`TTFT <= 500 ms` P95**, **`TPOT <= 7 ms` P95**, and **`E2EL <= 28 s` P95**!
+For each configuration: the highest measured goodput (requests that met `TTFT <= 500 ms`, `TPOT <= 10 ms` and `E2EL <= 60 s`) across the closed-loop (`CON`) and open-loop (`RPS`) `22k / 4k` cells, the cell where it was reached, and the P95 verdict for each SLA in that cell (E2E target `40–60 s`, evaluated as P95 `<= 60 s`). Goodput out tok/s/chip is derived (goodput req/s × `4,000` output tokens ÷ chips). Where no cell had a request that met all three SLAs, the verdicts are shown for the `CON=1` cell.
+
+| Configuration | Chips | Max Goodput (`req/s`) | Goodput Out tok/s/chip (derived) | Reached At | TTFT P95 `<= 500 ms` | TPOT P95 `<= 10 ms` | E2E P95 `<= 60 s` |
+|---|---:|---:|---:|---|---|---|---|
+| `vllm-torchtpu` `TP=8, DP=1, EP=true`, BF16 weights + BF16 KV | `4` | `0.052` | `51.9` | `CON=1`, `n=25` | met (`445.9 ms`) | met (`4.73 ms`) | met (`19.37 s`) |
+| `vllm-torchtpu` `TP=2, DP=4, EP=true`, BF16 weights + BF16 KV | `4` | `0` | `0` | none (verdicts at `CON=1`, `n=25`) | missed (`1,085.4 ms`) | met (`6.03 ms`) | met (`25.17 s`) |
+| `vllm-tpu` (JAX Flax NNX) `TP=2, DP=4`, BF16 weights + BF16 KV | `4` | `0` | `0` | none (verdicts at `CON=1`, `n=25`) | met (`443.7 ms`) | missed (`11.94 ms`) | met (`48.21 s`) |
+| BF16 weights + BF16 KV, 2 hosts | `8` | not measured | not measured | – | not measured | not measured | not measured |
+| BF16 weights + BF16 KV, 4 hosts | `16` | not measured | not measured | – | not measured | not measured | not measured |
+| `vllm-torchtpu` `TP=8, DP=1, EP=true`, FP8-Dynamic + FP8 KV — optional (non-BF16) | `4` | `0.057` | `56.6` | `RPS=1.0`, `n=50` | missed (`772.0 ms`) | missed (`14.01 ms`) | met (`56.70 s`) |
+| `vllm-torchtpu` `TP=2, DP=4, EP=true`, FP8-Dynamic + FP8 KV — optional (non-BF16) | `4` | `0` | `0` | none (verdicts at `CON=1`, `n=25`) | missed (`1,034.6 ms`) | met (`6.64 ms`) | met (`27.59 s`) |
+| `vllm-tpu` (JAX Flax NNX) `TP=2, DP=4`, BF16 weights + FP8 KV — optional (non-BF16) | `4` | `0` | `0` | none (verdicts at `CON=1`, `n=25`) | met (`430.2 ms`) | missed (`11.59 ms`) | met (`46.75 s`) |
+| `2x vllm-torchtpu` `TP=8, EP=true`, FP8-Dynamic + FP8 KV — optional (non-BF16) | `8` | `0.862` | `431.0` | `RPS=2.0`, `n=56` | missed (`632.1 ms`) | met (`9.41 ms`) | met (`38.06 s`) |
+| `4x vllm-torchtpu` `TP=8, EP=true`, FP8-Dynamic + FP8 KV — optional (non-BF16) | `16` | `1.585` | `396.1` | `RPS=6.0`, `n=60` | missed (`565.2 ms`) | met (`6.75 ms`) | met (`27.44 s`) |
+
+Among the BF16 configurations, only `vllm-torchtpu` `TP=8` met all three SLAs (at `CON=1`); `vllm-torchtpu` `TP=2, DP=4` missed TTFT and `vllm-tpu` missed TPOT at `CON=1`.
 
 ---
 
